@@ -52,7 +52,7 @@ def wandb_init[**P, OutT](
     _wandb_init: Callable[P, OutT] = wandb.init,
     *args: P.args,
     **kwargs: P.kwargs,
-) -> NestedSequence[OutT]: ...
+) -> np.ndarray[tuple[int, ...], np.dtype[np.generic[OutT]]]: ...
 
 
 def wandb_init[**P, OutT](
@@ -61,7 +61,7 @@ def wandb_init[**P, OutT](
     _wandb_init: Callable[P, OutT] = wandb.init,
     *args: P.args,
     **kwargs: P.kwargs,
-) -> OutT | NestedSequence[OutT]:
+) -> OutT | np.ndarray[tuple[int, ...], np.dtype[np.generic[OutT]]]:
     """Initializes multiple wandb runs in parallel.
 
     The usual args and kwargs to be passed to wandb.init will be overwritten by the (unstacked) values
