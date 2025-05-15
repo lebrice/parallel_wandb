@@ -1,0 +1,8 @@
+# Changes here will be overwritten by Copier
+_commit: v0.0.3
+_src_path: gh:lebrice/tool_template
+project_description: An example of how to do logging to multiple wandb runs in parallel.
+python_version: '3.12'
+tool_name: parallel_wandb
+your_email: fabrice.normandin@gmail.com
+your_name: Fabrice Normandin
