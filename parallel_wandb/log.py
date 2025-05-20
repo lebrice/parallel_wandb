@@ -47,21 +47,21 @@ def wandb_init[**P, OutT](
 
 @typing.overload
 def wandb_init[**P, OutT](
-    stacked_overrides: NestedMapping[str, NestedSequence],
+    stacked_overrides: NestedMapping[str, Sequence],
     process_index: int | None = None,
     _wandb_init: Callable[P, OutT] = wandb.init,
     *args: P.args,
     **kwargs: P.kwargs,
-) -> np.ndarray[tuple[int, ...], np.dtype[np.generic[OutT]]]: ...
+) -> NestedSequence[OutT]: ...
 
 
 def wandb_init[**P, OutT](
-    stacked_overrides: NestedMapping[str, NestedSequence[Any]] | None = None,
+    stacked_overrides: NestedMapping[str, Sequence] | None = None,
     process_index: int | None = None,
     _wandb_init: Callable[P, OutT] = wandb.init,
     *args: P.args,
     **kwargs: P.kwargs,
-) -> OutT | np.ndarray[tuple[int, ...], np.dtype[np.generic[OutT]]]:
+) -> OutT | NestedSequence[OutT]:
     """Initializes multiple wandb runs in parallel.
 
     The usual args and kwargs to be passed to wandb.init will be overwritten by the (unstacked) values
@@ -269,7 +269,16 @@ def wandb_log(
             metrics_i = optree.tree_map(operator.itemgetter(indexing_tuple), _metrics)
             metrics_i = typing.cast(dict[str, Any], metrics_i)
 
-        _log(wandb_run, metrics_i, step=step)
+        step_i = (
+            step
+            if isinstance(step, int) or (step.ndim == 0)
+            else step[indexing_tuple]
+            if step.ndim == len(indexing_tuple)
+            else step[run_index]
+            if step.ndim == 1
+            else _array_first_value(step, jittable=jittable)
+        )
+        _log(wandb_run, metrics_i, step=step_i)
 
     return
 
@@ -278,6 +287,7 @@ def map_fn_and_log_to_wandb[**P](
     wandb_run: Run | NestedSequence[Run],
     step: int | np.typing.ArrayLike,
     fn: Callable[Concatenate[tuple[int, ...], P], dict[str, Any]],
+    jittable: bool = False,
     *args: P.args,
     **kwargs: P.kwargs,
 ):
@@ -325,11 +335,16 @@ def map_fn_and_log_to_wandb[**P](
 
 def _array_first_value(array: np.typing.ArrayLike, jittable: bool = False) -> int:
     # Assume it's the same timestep for all runs, otherwise things might be tricky.
+    if isinstance(array, int):
+        return array
     if jittable:
+        if array.ndim == 0:
+            return array
         return array.flatten()[0]  # type: ignore
     else:
-        step = np.asarray(array).flatten()[0].item()
-        assert isinstance(step, int)
+        if array.ndim == 0:
+            return array
+        step = array.flatten()[0].item()
         return step
 
 
