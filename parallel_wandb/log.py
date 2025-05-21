@@ -136,7 +136,7 @@ def wandb_init[**P, OutT](
     )
 
     first_override = overrides[0]
-    if not isinstance(first_override, Sequence):
+    if not (isinstance(first_override, Sequence) or hasattr(first_override, "shape")):
         # The overrides are not stacked! (weird!) Do we want to support this?
         raise NotImplementedError(
             f"Assuming that all overrides are stacked for now. {first_override=}, {stacked_overrides=}"
@@ -222,6 +222,10 @@ def wandb_log(
     Doesn't work under jax.jit unless `jittable` is set to True.
     """
 
+    if not isinstance(step, int):
+        if type(step).__name__ == "DynamicJaxprTracer":
+            jittable = True
+
     # Assume it's the same timestep for all runs for simplicity?
     # if not isinstance(step, int):
     #     if jittable:
@@ -265,6 +269,9 @@ def wandb_log(
             # Log the same metrics in all runs.
             metrics_i = metrics
         else:
+            import jax
+
+            logger.info("Run index: %s, metrics: %s", run_index, jax.tree.map(jax.typeof, metrics))
             _metrics = typing.cast(Any, metrics)  # bug in optree.tree_map typing?
             metrics_i = optree.tree_map(operator.itemgetter(indexing_tuple), _metrics)
             metrics_i = typing.cast(dict[str, Any], metrics_i)

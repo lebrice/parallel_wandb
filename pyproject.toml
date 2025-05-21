@@ -22,7 +22,9 @@ dev = [
     "mkdocs-material>=9.5.44",
     "mkdocstrings[python]>=0.27.0",
     "black>=24.10.0",
+    "einops>=0.8.1",
     "jax>=0.6.0",
+    "rich>=14.0.0",
 ]
 
 [tool.pytest.ini_options]
