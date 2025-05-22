@@ -1,5 +1,6 @@
 from unittest.mock import Mock
 
+import pytest
 import wandb
 from wandb.sdk.wandb_run import Run
 from .log import wandb_init, wandb_log
@@ -90,3 +91,32 @@ def test_wandb_log_with_different_steps_per_run():
     fake_runs[1][0].log.assert_called_once_with({"a": 3}, step=13)
     fake_runs[1][1].log.assert_called_once_with({"a": 4}, step=14)
     fake_runs[1][2].log.assert_called_once_with({"a": 5}, step=15)
+
+
+def test_wandb_log_with_vmap():
+    # TODO:
+    fake_runs = [mock_run(), mock_run(), mock_run()]
+    import jax
+    import jax.numpy as jnp
+
+    with pytest.raises(ValueError, match="need to pass the `run_index` argument"):
+
+        def _fn(x):
+            wandb_log(fake_runs, {"a": x}, step=x)
+            return x + 1
+
+        outs = jax.vmap(_fn)(jnp.arange(3))
+        np.testing.assert_array_equal(outs, jnp.arange(1, 4))
+        fake_runs[0].log.assert_called_once_with({"a": 0}, step=0)
+        fake_runs[1].log.assert_called_once_with({"a": 1}, step=1)
+        fake_runs[2].log.assert_called_once_with({"a": 2}, step=2)
+
+    def _fn(x, run_index: jax.Array):
+        wandb_log(fake_runs, {"a": x}, step=x, run_index=run_index)
+        return x + 1
+
+    outs = jax.vmap(_fn)(jnp.arange(3) * 10, run_index=jnp.arange(3))
+    np.testing.assert_array_equal(outs, (jnp.arange(3) * 10) + 1)
+    fake_runs[0].log.assert_called_once_with({"a": jnp.array(0, dtype=jnp.int32)}, step=0)
+    fake_runs[1].log.assert_called_once_with({"a": jnp.array(10, dtype=jnp.int32)}, step=10)
+    fake_runs[2].log.assert_called_once_with({"a": jnp.array(20, dtype=jnp.int32)}, step=20)
