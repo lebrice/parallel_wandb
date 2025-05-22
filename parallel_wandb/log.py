@@ -321,8 +321,8 @@ def wandb_log(
         else:
             # logger.info("Run index: %s, metrics: %s", run_index, jax.tree.map(jax.typeof, metrics))
             # return
-            _metrics_i = typing.cast(Any, metrics_i)  # bug in optree.tree_map typing?
-            metrics_i = optree.tree_map(operator.itemgetter(indexing_tuple), _metrics_i)
+            _metrics = typing.cast(Any, metrics)  # bug in optree.tree_map typing?
+            metrics_i = optree.tree_map(operator.itemgetter(indexing_tuple), _metrics)
             metrics_i = typing.cast(dict[str, Any], metrics_i)
 
         step_i = (
