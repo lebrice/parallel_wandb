@@ -1,6 +1,5 @@
 from unittest.mock import Mock
 
-import pytest
 import wandb
 from wandb.sdk.wandb_run import Run
 from .log import wandb_init, wandb_log

@@ -151,7 +151,7 @@ def wandb_init[**P, OutT](
         grid_pos = np.unravel_index(run_index, shape)
         # Get the overrides for this run.
 
-        _overrides = typing.cast(Any, overrides)  # typing bug in optree (list isnt pytree?)
+        _overrides = typing.cast(Any, overrides)  # typing bug in optree (list isn't a pytree?)
         overrides_i = optree.tree_map(operator.itemgetter(grid_pos), _overrides)
 
         override_bound_args = sig.bind_partial(*base_bound_args.args, **base_bound_args.kwargs)
@@ -204,9 +204,6 @@ def default_run_suffix_fn(grid_pos: tuple[int, ...], grid_shape: tuple[int, ...]
     # Option 2: _index style
     index = np.arange(0, np.prod(grid_shape)).reshape(grid_shape)[grid_pos]
     return f"_{index}"
-
-
-from numpy._typing._array_like import _SupportsArray
 
 
 def wandb_log(
@@ -439,6 +436,12 @@ def map_fn_and_log_to_wandb[**P](
     log_fn(wandb_run, (), fn, *args, **kwargs)
 
 
+def _is_tracer(v: Any) -> bool:
+    if "Tracer" in type(v).__name__:
+        return True
+    return False
+
+
 def _check_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]) -> bool:
     """Returns `True` if all the entries in `metrics` have a shape that begins with `shape`."""
 
@@ -451,12 +454,6 @@ def _check_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]
     return optree.tree_all(optree.tree_map(_check_shape, metrics))
 
 
-def _is_tracer(v: Any) -> bool:
-    if "Tracer" in type(v).__name__:
-        return True
-    return False
-
-
 def _assert_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]) -> M:
     def _check_shape(metric: np.typing.ArrayLike):
         if not hasattr(metric, "shape"):
@@ -464,7 +461,8 @@ def _assert_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...
         metric = typing.cast(np.typing.NDArray, metric)
         if not metric.shape[: len(shape)] == shape:
             raise ValueError(
-                f"Metric {metric} has shape {metric.shape}, but expected its shape to begin with {wandb_runs.shape}"
+                f"Metric {metric} has shape {metric.shape}, but expected its "
+                f"shape to begin with {shape}"
             )
         return metric
 
