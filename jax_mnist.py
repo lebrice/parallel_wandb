@@ -344,8 +344,7 @@ def run(
         opt_state = opt_update(step, gradients, opt_state)  # type: ignore (step is array, which is fine).
         accuracy = get_accuracy(preds, targets)
 
-        if get_mesh_axis_size("batch"):
-            accuracy = jax.lax.pmean(accuracy, axis_name="batch")
+        accuracy = jax.lax.pmean(accuracy, axis_name="batch")
 
         wandb_log(
             wandb_run,
@@ -391,9 +390,9 @@ def run(
         test_preds = predict(params, test_images)
         test_loss = nce(test_preds, test_labels)
         test_accuracy = get_accuracy(test_preds, test_labels)
-        if get_mesh_axis_size("batch") is not None:
-            test_loss = jax.lax.pmean(test_loss, axis_name="batch")
-            test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
+
+        test_loss = jax.lax.pmean(test_loss, axis_name="batch")
+        test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
 
         wandb_log(
             wandb_run,
@@ -411,10 +410,6 @@ def run(
         xs=jnp.arange(num_epochs),
         length=num_epochs,
     )
-    # if get_mesh_axis_size("seed"):
-    # opt_state, test_accuracies = jax.lax.all_gather(
-    #     (opt_state, test_accuracies), axis_name="seed"
-    # )
     jax.debug.print("Final test accuracy for run {}: {}", run_index, test_accuracies[-1])
     return opt_state, test_accuracies[-1]
 
@@ -427,8 +422,7 @@ def loss(
 ):
     preds = predict(params, inputs)
     loss_value = nce(preds, targets)
-    if get_mesh_axis_size("batch"):
-        loss_value = jax.lax.pmean(loss_value, axis_name="batch")
+    loss_value = jax.lax.pmean(loss_value, axis_name="batch")
     return loss_value, preds
 
 
@@ -456,13 +450,6 @@ def time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
         return out
 
     return _wrapped
-
-
-def get_mesh_axis_size(axis_name: str, mesh: Mesh | AbstractMesh | None = None) -> int | None:
-    mesh = mesh if mesh is not None else get_abstract_mesh()
-    if axis_name not in mesh.axis_names:
-        return None
-    return mesh.shape[axis_name]
 
 
 def setup_logging(local_rank: int, num_processes: int, verbose: int):
