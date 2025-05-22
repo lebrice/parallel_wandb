@@ -1,18 +1,9 @@
-# Copyright 2018 The JAX Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+"""An example of parallel wandb logging.
 
-"""A basic MNIST example using JAX with the mini-libraries stax and optimizers.
+This example is adapted from https://github.com/google/flax/blob/main/examples/mnist/train.py
+
+
+A basic MNIST example using JAX with the mini-libraries stax and optimizers.
 
 The mini-library jax.example_libraries.stax is for neural network building, and
 the mini-library jax.example_libraries.optimizers is for first-order stochastic
@@ -28,21 +19,31 @@ import struct
 import sys
 import time
 import urllib.request
+from dataclasses import dataclass
 from os import path
 from typing import Callable
 
 import einops
 import jax
+import jax.experimental
+import jax.experimental.multihost_utils
+import jax.experimental.shard_map
 import jax.numpy as jnp
 import numpy as np
 import rich.logging
-from jax import NamedSharding, jit
+import rich.pretty
+import simple_parsing
+from jax import NamedSharding
 from jax.example_libraries import optimizers, stax
 from jax.example_libraries.optimizers import OptimizerState, Params
 from jax.example_libraries.stax import Dense, LogSoftmax, Relu
+from jax.sharding import AbstractMesh, Mesh, get_abstract_mesh
 from wandb.sdk.wandb_run import Run
 
-from parallel_wandb.log import wandb_init, wandb_log
+from parallel_wandb.log import NestedSequence, wandb_init, wandb_log
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 
 logger = logging.getLogger(__name__)
 _DATA = "/tmp/jax_example_data/"
@@ -75,12 +76,12 @@ def mnist_raw():
 
     def parse_labels(filename):
         with gzip.open(filename, "rb") as fh:
-            _ = struct.unpack(">II", fh.read(8))
+            _ = struct.unpack(">II", fh.read(8))  # type: ignore
             return np.array(array.array("B", fh.read()), dtype=np.uint8)
 
     def parse_images(filename):
         with gzip.open(filename, "rb") as fh:
-            _, num_data, rows, cols = struct.unpack(">IIII", fh.read(16))
+            _, num_data, rows, cols = struct.unpack(">IIII", fh.read(16))  # type: ignore
             return np.array(array.array("B", fh.read()), dtype=np.uint8).reshape(
                 num_data, rows, cols
             )
@@ -130,12 +131,17 @@ def loss(
     return neg_cross_entropy, preds
 
 
-def accuracy(params: Params, batch, predict: Callable):
-    inputs, targets = batch
-    target_class = jnp.argmax(targets, axis=1)
-    pred_logits = predict(params, inputs)
-    predicted_class = jnp.argmax(pred_logits, axis=1)
-    return jnp.mean(predicted_class == target_class)
+@dataclass
+class Args:
+    seed: int = 0
+    data_seed: int = 123
+    step_size: float = 0.001
+    num_epochs: int = 10
+    batch_size: int = 128
+    momentum_mass: float = 0.9
+    num_seeds: int = 1
+    data_parallel_devices: int = 1
+    args_are_per_device: bool = False
 
 
 def main():
@@ -147,33 +153,72 @@ def main():
         num_processes=jax.process_count(),
         verbose=2,
     )
-    seed = 0
-    data_seed = 123
-    step_size = 0.001
-    num_epochs = 10
-    batch_size = 128
-    momentum_mass = 0.9
+    logger.info(f"{jax.local_devices()=}, {jax.devices()=}")
 
-    rng = jax.random.key(seed)
-    data_rng = jax.random.key(data_seed)
-    num_seeds = 2
-    data_parallel_devices = 1
+    args = simple_parsing.parse(Args)
+
+    seed = args.seed
+    data_seed = args.data_seed
+    step_size = args.step_size
+    num_epochs = args.num_epochs
+    batch_size = args.batch_size
+    momentum_mass = args.momentum_mass
+    num_seeds = args.num_seeds
+    data_parallel_devices = args.data_parallel_devices
+    args_are_per_device = args.args_are_per_device
+
+    if (n_devices := jax.device_count()) > 1 and num_seeds == 1 and data_parallel_devices == 1:
+        raise RuntimeError(
+            f"{num_seeds=} and {data_parallel_devices=}, but there are {n_devices} devices available. "
+            f"Either:\n"
+            f"  1) setting '--num_seeds' to a multiple of {n_devices=} so that each device\n"
+            f"     is used for at least one run, OR:\n"
+            f"  2) setting '--data_parallel_devices' to {n_devices} to use all devices\n"
+            f"     for a single data-parallel training run."
+        )
+
+    if not args_are_per_device and data_parallel_devices > 1:
+        # Note: for now here we assume that the given batch size is meant to be spread across devices,
+        # (so that we ideally get the same result with one or two devices for the same batch size)
+        # Another option could be to assume that `batch_size` is the size per device, and leave it as-is.
+        # This would multiply the effective batch size by the number of devices.
+        global_batch_size = batch_size
+        batch_size = batch_size // data_parallel_devices
+        logger.warning(
+            f"Assuming that original `--batch_size` value ({global_batch_size}) represents "
+            f"the global batch size. Setting per-device batch size to {batch_size}."
+        )
+
+    # seed = 0
+    # data_seed = 123
+    # step_size = 0.001
+    # num_epochs = 10
+    # batch_size = 128
+    # momentum_mass = 0.9
+    # num_seeds = 4
+    # data_parallel_devices = 2
 
     mesh = jax.make_mesh(
         (jax.device_count() // data_parallel_devices, data_parallel_devices),
         axis_names=("seed", "batch"),
         axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Explicit),
     )
+
     seeds = seed + jnp.arange(num_seeds)
-    data_seeds = data_seed + jnp.arange(data_parallel_devices)
 
     rngs = jax.vmap(jax.random.key)(seeds)
-    data_rngs = jax.vmap(jax.random.key)(data_seeds)
+    data_rngs = jax.vmap(jax.random.key)(data_seed + jnp.arange(data_parallel_devices))
+    # data_rngs = jnp.tile(jnp.expand_dims(data_rngs, 0), (num_seeds, 1))
 
     wandb_run = wandb_init(
-        {"config": {"seed": seeds}},
+        {"name": [f"{seed=}" for seed in seeds.tolist()], "config": {"seed": seeds}},
         process_index=jax.process_index(),
         project="parallel_wandb_example",
+        group=(
+            f"{os.environ['SLURM_JOB_ID']}_{os.environ['SLURM_STEP_ID']}"
+            if "SLURM_JOB_ID" in os.environ
+            else None
+        ),
         config=dict(
             seed=seed,
             data_seed=data_seed,
@@ -187,132 +232,216 @@ def main():
     train_images, train_labels, test_images, test_labels = jax.tree.map(
         jnp.asarray, (train_images, train_labels, test_images, test_labels)
     )
-
-    _final_states, final_test_accs = time_fn(
-        jax.jit(
-            jax.vmap(
-                jax.vmap(
-                    lambda rng, data_rng: run(
-                        rng,
-                        data_rng,
-                        step_size=step_size,
-                        num_epochs=num_epochs,
-                        batch_size=batch_size,
-                        momentum_mass=momentum_mass,
-                        train_images=train_images,
-                        train_labels=train_labels,
-                        test_images=test_images,
-                        test_labels=test_labels,
-                        wandb_run=wandb_run,
-                    ),
-                    in_axes=(None, 0),
-                    axis_name="batch",
+    run_fn = functools.partial(
+        run,
+        # rng,
+        # data_rng,
+        # run_index,
+        step_size=step_size,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        momentum_mass=momentum_mass,
+        train_images=train_images,
+        train_labels=train_labels,
+        test_images=test_images,
+        test_labels=test_labels,
+        wandb_run=wandb_run,
+    )
+    data_parallel_run_fn = jax.vmap(
+        run_fn,
+        in_axes=(None, 0, None),
+        axis_name="batch",
+    )
+    multi_seed_data_parallel_run_fn = jax.vmap(
+        data_parallel_run_fn,
+        in_axes=(0, None, 0),
+        axis_name="seed",
+    )
+    use_shard_map = False
+    if use_shard_map:
+        jitted_sharded_run_fn = jax.jit(
+            jax.experimental.shard_map.shard_map(
+                multi_seed_data_parallel_run_fn,
+                mesh=mesh,
+                in_specs=(
+                    jax.sharding.PartitionSpec("seed"),
+                    jax.sharding.PartitionSpec("batch"),
+                    jax.sharding.PartitionSpec("seed"),
                 ),
-                in_axes=(0, None),
-                axis_name="seed",
+                out_specs=(
+                    jax.sharding.PartitionSpec(),
+                    jax.sharding.PartitionSpec(),
+                ),
             ),
+            # in_shardings=(
+            #     NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
+            #     NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
+            # ),
+        )
+    else:
+        # Use JIT's `in_shardings`:
+        jitted_sharded_run_fn = jax.jit(
+            multi_seed_data_parallel_run_fn,
             in_shardings=(
                 NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
                 NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
+                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
             ),
-            # out_shardings=(
-            #     jax.sharding.PartitionSpec("seed"),
-            #     jax.sharding.PartitionSpec("seed", "batch"),
-            # ),
+            # Replicate the outputs on all devices:
+            out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
         )
-    )(
-        rngs,
-        data_rngs,
+    final_state, final_test_accs = time_fn(jitted_sharded_run_fn, desc="run")(
+        rngs, data_rngs, jnp.arange(num_seeds)
     )
-    print(f"Final test accuracies: {final_test_accs}")
+    rich.pretty.pprint(jax.tree.map(jax.typeof, final_state))
+    print(f"{final_test_accs=}")
 
 
 def run(
     rng: jax.Array,
     data_rng: jax.Array,
+    run_index: jax.Array,
     train_images: jax.Array,
     train_labels: jax.Array,
     test_images: jax.Array,
     test_labels: jax.Array,
-    wandb_run: Run,
-    step_size=0.001,
-    num_epochs=10,
-    batch_size=128,
-    momentum_mass=0.9,
+    wandb_run: Run | NestedSequence[Run],
+    step_size: float | jax.Array = 0.001,
+    num_epochs: int = 10,
+    batch_size: int = 128,
+    momentum_mass: float | jax.Array = 0.9,
 ):
-    num_train = train_images.shape[0]
+    num_train_images = train_images.shape[0]
 
+    # Create the network structure:
+    # - `init_random_params` is a function that takes a random key and input shape
+    #    and returns the initial (random) parameters.
+    # - `predict` is a function that takes parameters and inputs and returns
+    #    the predicted outputs.
     init_random_params, predict = stax.serial(
         Dense(1024), Relu, Dense(1024), Relu, Dense(10), LogSoftmax
     )
+    num_train_batches = num_train_images // batch_size
 
-    num_complete_batches, _leftover = divmod(num_train, batch_size)
-
+    # Create the optimizer:
+    # - `opt_init` initializes the optimizer state by 'wrapping' the network parameters
+    #    creating optimizer-specific buffers.
+    # - `opt_update` updates the parameters and optimizer state.
+    # - `get_params` extracts just the model parameters portion of the "optimizer state".
     opt_init, opt_update, get_params = optimizers.momentum(step_size, mass=momentum_mass)
-    _, init_params = init_random_params(rng, (-1, 28 * 28))
-    opt_state = opt_init(init_params)
 
-    @jit
-    def update(opt_state: OptimizerState, step_and_batch: jax.Array):
-        step, batch = step_and_batch
+    def update(
+        opt_state: OptimizerState,
+        step_and_batch: tuple[jax.Array, tuple[jax.Array, jax.Array]],
+    ):
+        step, (inputs, targets) = step_and_batch
         params = get_params(opt_state)
+        # Use this network when computing the loss:
         loss_fn = functools.partial(loss, predict=predict)
-        (train_loss, preds), gradients = jax.value_and_grad(loss_fn, has_aux=True)(params, batch)
-        opt_state = opt_update(step, gradients, opt_state)
-        labels = batch[1]
-        accuracy = jnp.mean(preds.argmax(-1) == labels.argmax(-1))
-        accuracy = jax.lax.pmean(accuracy, axis_name="batch")
+        (train_loss, preds), gradients = jax.value_and_grad(loss_fn, has_aux=True)(
+            params, inputs, targets
+        )
+        opt_state = opt_update(step, gradients, opt_state)  # type: ignore (step is array, which is fine).
+        accuracy = get_accuracy(preds, targets)
+
+        if get_mesh_axis_size("batch"):
+            accuracy = jax.lax.pmean(accuracy, axis_name="batch")
+
         wandb_log(
             wandb_run,
-            {"train/loss": train_loss, "train/accuracy": accuracy},
+            metrics={"train/loss": train_loss, "train/accuracy": accuracy},
             step=step,
+            run_index=run_index,
         )
         return opt_state, (train_loss, preds)
 
-    @jax.jit
     def epoch(opt_state: OptimizerState, epoch: jax.Array):
+        # Get a different random key at each epoch (which is used to shuffle the data).
         epoch_data_rng = jax.random.fold_in(data_rng, epoch)
-        perm = jax.random.permutation(epoch_data_rng, num_train)
-        perm = perm[: num_complete_batches * batch_size]  # drop leftover.
+
+        perm = jax.random.permutation(epoch_data_rng, num_train_images)
+        perm = perm[: num_train_batches * batch_size]  # drop leftover indices.
+        # Shuffle the training images and labels.
         epoch_train_data, epoch_train_labels = train_images[perm], train_labels[perm]
+
+        # Rearrange the training data into batches.
         epoch_train_data, epoch_train_labels = jax.tree.map(
-            lambda v: einops.rearrange(
-                v, "(n b) ... -> n b ...", n=num_complete_batches, b=batch_size
-            ),
+            lambda v: einops.rearrange(v, "(n b) ... -> n b ...", b=batch_size),
             (epoch_train_data, epoch_train_labels),
         )
-        epoch_start_step = epoch * num_complete_batches
+        assert isinstance(epoch_train_data, jax.Array)
+        assert isinstance(epoch_train_labels, jax.Array)
+        epoch_start_step = epoch * num_train_batches
+
         opt_state, (train_losses, _preds) = jax.lax.scan(
             update,
             init=opt_state,
             xs=(
                 # update steps
-                epoch_start_step + jnp.arange(num_complete_batches),
+                epoch_start_step + jnp.arange(num_train_batches),
+                # Data
                 (epoch_train_data, epoch_train_labels),
             ),
-            length=num_complete_batches,
+            length=num_train_batches,
         )
-        test_loss, test_preds = loss(
-            get_params(opt_state), (test_images, test_labels), predict=predict
-        )
-        test_accuracy = jnp.mean(test_preds.argmax(-1) == test_labels.argmax(-1))
-        test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
+
+        params = get_params(opt_state)
+
+        # note: forward pass with huge batch size (entire test set). Not ideal!
+        test_preds = predict(params, test_images)
+        test_loss = nce(test_preds, test_labels)
+        test_accuracy = get_accuracy(test_preds, test_labels)
+        if get_mesh_axis_size("batch") is not None:
+            test_loss = jax.lax.pmean(test_loss, axis_name="batch")
+            test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
+
         wandb_log(
             wandb_run,
             {"test/loss": test_loss, "accuracy": test_accuracy},
-            step=(epoch + 1) * num_complete_batches,
+            step=(epoch + 1) * num_train_batches,
+            run_index=run_index,
         )
-        return opt_state, (train_losses, test_accuracy)
+        return opt_state, test_accuracy
 
-    opt_state, (train_losses, test_accuracies) = jax.lax.scan(
+    rng, initial_parameters = init_random_params(rng, (-1, 28 * 28))
+    opt_state = opt_init(initial_parameters)
+    opt_state, test_accuracies = jax.lax.scan(
         epoch,
         init=opt_state,
         xs=jnp.arange(num_epochs),
         length=num_epochs,
     )
-    # test_acc = accuracy(get_params(opt_state), (test_images, test_labels), predict)
-    jax.debug.print("Final test accuracy: {:.2%}", test_accuracies[-1])
+    # if get_mesh_axis_size("seed"):
+    # opt_state, test_accuracies = jax.lax.all_gather(
+    #     (opt_state, test_accuracies), axis_name="seed"
+    # )
+    jax.debug.print("Final test accuracy for run {}: {}", run_index, test_accuracies[-1])
     return opt_state, test_accuracies[-1]
+
+
+def loss(
+    params: Params,
+    inputs: jax.Array,
+    targets: jax.Array,
+    predict: Callable[[Params, jax.Array], jax.Array],
+):
+    preds = predict(params, inputs)
+    loss_value = nce(preds, targets)
+    if get_mesh_axis_size("batch"):
+        loss_value = jax.lax.pmean(loss_value, axis_name="batch")
+    return loss_value, preds
+
+
+def nce(preds: jax.Array, targets: jax.Array):
+    """Negative cross-entropy loss.
+
+    Roughly: -1 * "How close the predicted probabilities match the target distribution"
+    """
+    return -jnp.mean(jnp.sum(preds * targets, axis=-1))
+
+
+def get_accuracy(preds: jax.Array, targets: jax.Array):
+    return jnp.mean(preds.argmax(-1) == targets.argmax(-1))
 
 
 def time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
@@ -323,15 +452,22 @@ def time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
         t0 = time.time()
         out = fn(*args, **kwargs)
         out = jax.block_until_ready(out)
-        print(f"`{desc}` took {time.time() - t0} seconds to run.")
+        logger.info(f"`{desc}` took {time.time() - t0} seconds to complete.")
         return out
 
     return _wrapped
 
 
+def get_mesh_axis_size(axis_name: str, mesh: Mesh | AbstractMesh | None = None) -> int | None:
+    mesh = mesh if mesh is not None else get_abstract_mesh()
+    if axis_name not in mesh.axis_names:
+        return None
+    return mesh.shape[axis_name]
+
+
 def setup_logging(local_rank: int, num_processes: int, verbose: int):
     # Widen the log width when running in an sbatch script.
-    from parallel_wandb.log import logger
+    from parallel_wandb.log import logger as package_logger
 
     if not sys.stdout.isatty():
         console = rich.console.Console(width=140)
@@ -353,10 +489,13 @@ def setup_logging(local_rank: int, num_processes: int, verbose: int):
     if verbose == 0:
         # logger.setLevel(logging.ERROR)
         logger.setLevel(logging.WARNING)
+        package_logger.setLevel(logging.WARNING)
     elif verbose == 1:
         logger.setLevel(logging.INFO)
+        package_logger.setLevel(logging.INFO)
     elif verbose >= 2:
         logger.setLevel(logging.DEBUG)
+        package_logger.setLevel(logging.DEBUG)
     # else:
     #     assert verbose >= 3
 
