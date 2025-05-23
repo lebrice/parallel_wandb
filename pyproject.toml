@@ -7,11 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dynamic = ["version"]
-dependencies = [
-    "numpy>=2.2.5",
-    "optree>=0.15.0",
-    "wandb>=0.19.11",
-]
+dependencies = ["numpy>=2.2.5", "optree>=0.15.0", "wandb>=0.19.11"]
 
 
 [dependency-groups]
@@ -23,7 +19,8 @@ dev = [
     "mkdocstrings[python]>=0.27.0",
     "black>=24.10.0",
     "einops>=0.8.1",
-    "jax[cuda12]>=0.6.0",
+    "jax>=0.6.0",
+    "jax[cuda12]>=0.6.0; sys_platform == 'linux'",
     "rich>=14.0.0",
     "simple-parsing>=0.1.7",
 ]
