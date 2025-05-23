@@ -1,1 +1,1 @@
-::: parallel_wandb
+::: parallel_wandb.log

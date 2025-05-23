@@ -1,16 +1,12 @@
-"""IDEA: Create a process that when starting, does wandb.init, and when it receives things via some kind of pipe, simply calls
-wandb.log.
-
-The goal is to create a list of these subprocess handles, so that we can log to many wandb runs in parallel.
-"""
+"""Functions that make it easy to create and log metrics to multiple wandb runs in parallel."""
 
 import inspect
 import operator
 import os
+import typing
 from collections.abc import Callable, Sequence
 from logging import getLogger
 from typing import Any, Concatenate, Mapping, TypeVar
-import typing
 
 import numpy as np
 import optree
@@ -31,33 +27,13 @@ logger = getLogger(__name__)
 # RUN_OBJECTS: dict[int, Run] = {}
 
 
-@typing.overload
-def wandb_init[**P, OutT](
-    stacked_overrides: None = None,
-    process_index: int | None = None,
-    _wandb_init: Callable[P, OutT] = wandb.init,
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> OutT: ...
-
-
-@typing.overload
-def wandb_init[**P, OutT](
-    stacked_overrides: NestedMapping[str, np.typing.ArrayLike],
-    process_index: int | None = None,
-    _wandb_init: Callable[P, OutT] = wandb.init,
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> NestedSequence[OutT]: ...
-
-
-def wandb_init[**P, OutT](
+def wandb_init[**P](
     stacked_overrides: NestedMapping[str, np.typing.ArrayLike] | None = None,
     process_index: int | None = None,
-    _wandb_init: Callable[P, OutT] = wandb.init,
+    _wandb_init: Callable[P, Run] = wandb.init,
     *args: P.args,
     **kwargs: P.kwargs,
-) -> OutT | NestedSequence[OutT]:
+) -> NestedSequence[Run]:
     """Initializes multiple wandb runs in parallel.
 
     The usual args and kwargs to be passed to wandb.init will be overwritten by the (unstacked) values
@@ -118,18 +94,17 @@ def wandb_init[**P, OutT](
         # Always useful: Add the SLURM environment variables to the config dict.
         config.update({k: v for k, v in os.environ.items() if k.startswith("SLURM")})
 
-
     # IDEA: Could be interesting to enable logging on other processes if the data is local to them anyway?
     # (to avoid transferring data to the first node all the time)
     if (process_index or 0) != 0:
         kwargs["mode"] = "disabled"
 
-    def _base_case(*args: P.args, **kwargs: P.kwargs) -> OutT:
+    def _base_case(*args: P.args, **kwargs: P.kwargs) -> Run:
         kwargs["reinit"] = "create_new"  # Essential: Makes it possible to create multiple runs.
         return _wandb_init(*args, **kwargs)
 
     if not stacked_overrides:
-        return _base_case(*args, **kwargs)
+        return np.asanyarray(_base_case(*args, **kwargs))
 
     stacked_overrides = stacked_overrides or {}
     _stacked_overrides = typing.cast(Any, stacked_overrides)  # typing bug in optree?
@@ -188,23 +163,6 @@ def wandb_init[**P, OutT](
     return np.array(runs).reshape(shape)
 
 
-def _merge[T](v1: T, v2: T) -> T:
-    """Merge two values (maybe dictionaries) recursively."""
-    if not isinstance(v1, dict):
-        return v2
-    assert isinstance(v2, dict)  # both should be dicts!
-    # T := dict
-    result = {}
-    for k in v1.keys() | v2.keys():
-        if k not in v1:
-            result[k] = v2[k]
-        elif k not in v2:
-            result[k] = v1[k]
-        else:
-            result[k] = _merge(v1[k], v2[k])
-    return result  # type: ignore
-
-
 def default_run_suffix_fn(grid_pos: tuple[int, ...], grid_shape: tuple[int, ...]) -> str:
     # Option 1: _i_j_k style
     # return "_".join(map(str, grid_pos))
@@ -220,40 +178,35 @@ def wandb_log(
     step: int | np.typing.NDArray[np.integer] | np.typing.ArrayLike,
     run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
     metrics_are_stacked: bool | None = None,
-    calling_fn_will_be_jitted: bool | None = None,
-    calling_fn_will_be_vmapped: bool | None = None,
 ):
     """Log metrics to wandb.
+
+
 
     Doesn't work under jax.jit unless `jittable` is set to True.
     """
     wandb_run_array = np.asanyarray(wandb_run)
 
-    if calling_fn_will_be_jitted is None:
-        # TODO: Do we need the `step` and `metrics` to both be (or not be) traced?
-        # If not, then we should probably adapt the code below to handle the case where step is not a tracer,
-        # otherwise we might get some errors I think.
-        calling_fn_will_be_jitted = optree.tree_all(optree.tree_map(_is_tracer, (metrics, step)))
-        logger.debug(f"Calling function will be jitted: {calling_fn_will_be_jitted}")
+    # TODO: Do we need the `step` and `metrics` to both be (or not be) traced?
+    # If not, then we should probably adapt the code below to handle the case where step is not a tracer,
+    # otherwise we might get some errors I think.
+    calling_fn_will_be_jitted = optree.tree_all(optree.tree_map(_is_tracer, (metrics, step)))
+    logger.debug(f"Calling function will be jitted: {calling_fn_will_be_jitted}")
 
     if metrics_are_stacked is None:
         metrics_are_stacked = _check_shape_prefix(metrics, wandb_run_array.shape)
 
-    if calling_fn_will_be_vmapped is None:
-        if wandb_run_array.ndim >= 1 and not metrics_are_stacked:
-            # Multiple wandb_runs and metrics are for a single run, this is probably being called
-            # from a function that is (or is going to be?) vmapped.
-            logger.debug(
-                f"Assuming that the calling function will be vmapped since {wandb_run_array.ndim=} and {metrics_are_stacked=}"
-            )
-            calling_fn_will_be_vmapped = True
-
-    if calling_fn_will_be_vmapped:
+    if calling_fn_will_be_jitted and wandb_run_array.ndim >= 1 and not metrics_are_stacked:
+        # Multiple wandb_runs and metrics are for a single run, this is probably being called
+        # from a function that is (or is going to be?) vmapped.
+        logger.debug(
+            f"Assuming that the calling function is vmapped since {wandb_run_array.ndim=} and {metrics_are_stacked=}"
+        )
         if isinstance(wandb_run, Run):
             raise ValueError(
-                f"When `{calling_fn_will_be_vmapped=}` (because is is inferred to be True "
-                f"or explicitly passed as an argument), then we expect `wandb_run` to be a "
-                f"(possibly-nested) sequence of Wandb Run objects!"
+                "It is assumed that the function calling this is being vmapped, "
+                "so `wandb_run` is expected to be an array or a (possibly-nested) "
+                "sequence of Wandb Run objects."
             )
         # There are multiple wandb runs, and metrics are not stacked
         # (dont have the wandb_runs shape as a prefix in their shapes)
@@ -441,6 +394,23 @@ def map_fn_and_log_to_wandb[**P](
             log_fn(wandb_run, grid_pos + (i,), fn, *args_i, **kwargs_i)
 
     log_fn(wandb_run, (), fn, *args, **kwargs)
+
+
+def _merge[T](v1: T, v2: T) -> T:
+    """Merge two values (maybe dictionaries) recursively."""
+    if not isinstance(v1, dict):
+        return v2
+    assert isinstance(v2, dict)  # both should be dicts!
+    # T := dict
+    result = {}
+    for k in v1.keys() | v2.keys():
+        if k not in v1:
+            result[k] = v2[k]
+        elif k not in v2:
+            result[k] = v1[k]
+        else:
+            result[k] = _merge(v1[k], v2[k])
+    return result  # type: ignore
 
 
 def _is_tracer(v: Any) -> bool:

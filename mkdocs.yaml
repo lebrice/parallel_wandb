@@ -21,6 +21,7 @@ plugins:
           inventories:
             - https://docs.pytest.org/en/stable/objects.inv
             - https://docs.python.org/3/objects.inv
+            - https://numpy.org/doc/stable/objects.inv
           options:
             docstring_style: numpy
             members_order: source
