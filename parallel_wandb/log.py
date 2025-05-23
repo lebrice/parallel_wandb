@@ -77,11 +77,11 @@ def wandb_init[**P, OutT](
     ])
     ```
 
-    For example:
+    This also works with nested arrays:
 
     ```python
     wandb_init({"name": [["run_1", "run_2"], ["run_3", "run_4]], "config": {"seed": [[1, 2], [3, 4]]}})
-    # This will create three runs like so:
+    # This will create four runs like so:
     np.asarray([
         [
             wandb.init(name="run_1", config={"seed": 1}, reinit="create_new"),
@@ -95,6 +95,12 @@ def wandb_init[**P, OutT](
     ```
 
     """
+    if optree.tree_any(optree.tree_map(_is_tracer, (stacked_overrides, args, kwargs))):  # type: ignore
+        raise ValueError(
+            "`wandb_init` is not yet compatible with `jax.jit` or `jax.vmap`.\n"
+            "For now, create the runs outside the jitted function, and pass the "
+            "runs as a static argument."
+        )
 
     # Disable logging if not on the first process.
     # NOTE: With Jax, it's best to do the same thing on all processes, to avoid deadlocks.
@@ -111,6 +117,7 @@ def wandb_init[**P, OutT](
         assert isinstance(config, dict)
         # Always useful: Add the SLURM environment variables to the config dict.
         config.update({k: v for k, v in os.environ.items() if k.startswith("SLURM")})
+
 
     # IDEA: Could be interesting to enable logging on other processes if the data is local to them anyway?
     # (to avoid transferring data to the first node all the time)
