@@ -39,13 +39,14 @@ repos:
         require_serial: true
 
   # python docstring formatting
-  - repo: https://github.com/myint/docformatter
-    rev: v1.7.5
-    hooks:
-      - id: docformatter
-        language: python
-        args: [--in-place]
-        require_serial: true
+  # TODO: Broken (STILL)
+  # - repo: https://github.com/myint/docformatter
+  #   rev: v1.7.5
+  #   hooks:
+  #     - id: docformatter
+  #       language: python
+  #       args: [--in-place]
+  #       require_serial: true
 
   # NOTE: Disabling this, since I'm having the glib-c2.29 weird bug.
   # # yaml formatting

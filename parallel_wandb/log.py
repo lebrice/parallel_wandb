@@ -1,21 +1,13 @@
-"""IDEA: Create a process that when starting, does wandb.init, and when it receives things via some kind of pipe, simply calls
-wandb.log.
+"""Functions that make it easy to create and log metrics to multiple wandb runs in parallel."""
 
-The goal is to create a list of these subprocess handles, so that we can log to many wandb runs in parallel.
-"""
-
-import copy
 import inspect
 import operator
 import os
+import typing
 from collections.abc import Callable, Sequence
 from logging import getLogger
-from typing import Any, Concatenate, Mapping, TypeAlias, TypeVar, TypeVarTuple
-import typing
+from typing import Any, Concatenate, Mapping, TypeVar
 
-# import jax
-# import jax.experimental
-# import jax.experimental.multihost_utils
 import numpy as np
 import optree
 import optree.accessor
@@ -35,33 +27,13 @@ logger = getLogger(__name__)
 # RUN_OBJECTS: dict[int, Run] = {}
 
 
-@typing.overload
-def wandb_init[**P, OutT](
-    stacked_overrides: None = None,
+def wandb_init[**P](
+    stacked_overrides: NestedMapping[str, np.typing.ArrayLike] | None = None,
     process_index: int | None = None,
-    _wandb_init: Callable[P, OutT] = wandb.init,
+    _wandb_init: Callable[P, Run] = wandb.init,
     *args: P.args,
     **kwargs: P.kwargs,
-) -> OutT: ...
-
-
-@typing.overload
-def wandb_init[**P, OutT](
-    stacked_overrides: NestedMapping[str, Sequence],
-    process_index: int | None = None,
-    _wandb_init: Callable[P, OutT] = wandb.init,
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> NestedSequence[OutT]: ...
-
-
-def wandb_init[**P, OutT](
-    stacked_overrides: NestedMapping[str, Sequence] | None = None,
-    process_index: int | None = None,
-    _wandb_init: Callable[P, OutT] = wandb.init,
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> OutT | NestedSequence[OutT]:
+) -> NestedSequence[Run]:
     """Initializes multiple wandb runs in parallel.
 
     The usual args and kwargs to be passed to wandb.init will be overwritten by the (unstacked) values
@@ -81,11 +53,11 @@ def wandb_init[**P, OutT](
     ])
     ```
 
-    For example:
+    This also works with nested arrays:
 
     ```python
     wandb_init({"name": [["run_1", "run_2"], ["run_3", "run_4]], "config": {"seed": [[1, 2], [3, 4]]}})
-    # This will create three runs like so:
+    # This will create four runs like so:
     np.asarray([
         [
             wandb.init(name="run_1", config={"seed": 1}, reinit="create_new"),
@@ -99,6 +71,12 @@ def wandb_init[**P, OutT](
     ```
 
     """
+    if optree.tree_any(optree.tree_map(_is_tracer, (stacked_overrides, args, kwargs))):  # type: ignore
+        raise ValueError(
+            "`wandb_init` is not yet compatible with `jax.jit` or `jax.vmap`.\n"
+            "For now, create the runs outside the jitted function, and pass the "
+            "runs as a static argument."
+        )
 
     # Disable logging if not on the first process.
     # NOTE: With Jax, it's best to do the same thing on all processes, to avoid deadlocks.
@@ -121,12 +99,12 @@ def wandb_init[**P, OutT](
     if (process_index or 0) != 0:
         kwargs["mode"] = "disabled"
 
-    def _base_case(*args: P.args, **kwargs: P.kwargs) -> OutT:
+    def _base_case(*args: P.args, **kwargs: P.kwargs) -> Run:
         kwargs["reinit"] = "create_new"  # Essential: Makes it possible to create multiple runs.
         return _wandb_init(*args, **kwargs)
 
     if not stacked_overrides:
-        return _base_case(*args, **kwargs)
+        return np.asanyarray(_base_case(*args, **kwargs))
 
     stacked_overrides = stacked_overrides or {}
     _stacked_overrides = typing.cast(Any, stacked_overrides)  # typing bug in optree?
@@ -136,7 +114,7 @@ def wandb_init[**P, OutT](
     )
 
     first_override = overrides[0]
-    if not isinstance(first_override, Sequence):
+    if not (isinstance(first_override, Sequence) or hasattr(first_override, "shape")):
         # The overrides are not stacked! (weird!) Do we want to support this?
         raise NotImplementedError(
             f"Assuming that all overrides are stacked for now. {first_override=}, {stacked_overrides=}"
@@ -155,7 +133,7 @@ def wandb_init[**P, OutT](
         grid_pos = np.unravel_index(run_index, shape)
         # Get the overrides for this run.
 
-        _overrides = typing.cast(Any, overrides)  # typing bug in optree (list isnt pytree?)
+        _overrides = typing.cast(Any, overrides)  # typing bug in optree (list isn't a pytree?)
         overrides_i = optree.tree_map(operator.itemgetter(grid_pos), _overrides)
 
         override_bound_args = sig.bind_partial(*base_bound_args.args, **base_bound_args.kwargs)
@@ -185,23 +163,6 @@ def wandb_init[**P, OutT](
     return np.array(runs).reshape(shape)
 
 
-def _merge[T](v1: T, v2: T) -> T:
-    """Merge two values (maybe dictionaries) recursively."""
-    if not isinstance(v1, dict):
-        return v2
-    assert isinstance(v2, dict)  # both should be dicts!
-    # T := dict
-    result = {}
-    for k in v1.keys() | v2.keys():
-        if k not in v1:
-            result[k] = v2[k]
-        elif k not in v2:
-            result[k] = v1[k]
-        else:
-            result[k] = _merge(v1[k], v2[k])
-    return result  # type: ignore
-
-
 def default_run_suffix_fn(grid_pos: tuple[int, ...], grid_shape: tuple[int, ...]) -> str:
     # Option 1: _i_j_k style
     # return "_".join(map(str, grid_pos))
@@ -213,14 +174,57 @@ def default_run_suffix_fn(grid_pos: tuple[int, ...], grid_shape: tuple[int, ...]
 def wandb_log(
     wandb_run: Run | NestedSequence[Run],
     metrics: dict[str, Any],
-    step: int | np.typing.ArrayLike,
-    metrics_are_stacked: bool = True,
-    jittable: bool = False,
+    # run_index: tuple[int, ...] | None = None,
+    step: int | np.typing.NDArray[np.integer] | np.typing.ArrayLike,
+    run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
+    metrics_are_stacked: bool | None = None,
 ):
     """Log metrics to wandb.
 
+
+
     Doesn't work under jax.jit unless `jittable` is set to True.
     """
+    wandb_run_array = np.asanyarray(wandb_run)
+
+    # TODO: Do we need the `step` and `metrics` to both be (or not be) traced?
+    # If not, then we should probably adapt the code below to handle the case where step is not a tracer,
+    # otherwise we might get some errors I think.
+    calling_fn_will_be_jitted = optree.tree_all(optree.tree_map(_is_tracer, (metrics, step)))
+    logger.debug(f"Calling function will be jitted: {calling_fn_will_be_jitted}")
+
+    if metrics_are_stacked is None:
+        metrics_are_stacked = _check_shape_prefix(metrics, wandb_run_array.shape)
+
+    if calling_fn_will_be_jitted and wandb_run_array.ndim >= 1 and not metrics_are_stacked:
+        # Multiple wandb_runs and metrics are for a single run, this is probably being called
+        # from a function that is (or is going to be?) vmapped.
+        logger.debug(
+            f"Assuming that the calling function is vmapped since {wandb_run_array.ndim=} and {metrics_are_stacked=}"
+        )
+        if isinstance(wandb_run, Run):
+            raise ValueError(
+                "It is assumed that the function calling this is being vmapped, "
+                "so `wandb_run` is expected to be an array or a (possibly-nested) "
+                "sequence of Wandb Run objects."
+            )
+        # There are multiple wandb runs, and metrics are not stacked
+        # (dont have the wandb_runs shape as a prefix in their shapes)
+        # --> This is probably being called inside a function that is being vmapped!
+        if run_index is None:
+            raise ValueError(
+                f"There are multiple wandb runs, and metrics are not stacked "
+                f"(they dont have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
+                f"This means that you are likely calling `{wandb_log.__name__}` inside a function "
+                f"that is being vmapped!\n"
+                f"In this case, and since we can't tell at which 'index' in the vmap we're at, "
+                f"you also need to pass the `run_index` argument. "
+                f"This will be used to index into the `wandb_runs` array to select which run to log at.\n"
+                f"`run_index=jnp.arange(num_seeds)` is a good option.\n"
+                f"See the `jax_mnist.py` file example in the `parallel_wandb` repo for an example.\n"
+                f"Metric shapes: {optree.tree_map(operator.attrgetter('shape'), metrics)}"
+            )
+        return wandb_log_under_vmap(wandb_run, run_index=run_index, metrics=metrics, step=step)
 
     # Assume it's the same timestep for all runs for simplicity?
     # if not isinstance(step, int):
@@ -231,7 +235,7 @@ def wandb_log(
     #         assert isinstance(step, int)
     def _log(wandb_run: Run, metrics: dict[str, Any], step: int | np.typing.ArrayLike):
         """Base case: single run, simple dict of metrics."""
-        if jittable:
+        if calling_fn_will_be_jitted:
             import jax.experimental  # type: ignore
 
             # IDEA: use regular wandb_run.log when not in a jit context?
@@ -254,8 +258,18 @@ def wandb_log(
     if isinstance(wandb_run, Run):
         return _log(wandb_run, metrics, step)
 
-    wandb_runs = np.asarray(wandb_run)
+    wandb_runs = np.asanyarray(wandb_run)
     num_runs = np.prod(wandb_runs.shape)
+
+    def _check_shape(metric: Any):
+        if not metric.shape[: len(wandb_runs.shape)] == wandb_runs.shape:
+            raise ValueError(
+                f"Metric {metric} has shape {metric.shape}, but expected its shape to begin with {wandb_runs.shape}"
+            )
+        return metric
+
+    metrics = optree.tree_map(_check_shape, metrics)
+
     # non-recursive version that indexes using the multi-dimensional metrics.
     for run_index in range(num_runs):
         indexing_tuple = np.unravel_index(run_index, wandb_runs.shape)
@@ -265,6 +279,8 @@ def wandb_log(
             # Log the same metrics in all runs.
             metrics_i = metrics
         else:
+            # logger.info("Run index: %s, metrics: %s", run_index, jax.tree.map(jax.typeof, metrics))
+            # return
             _metrics = typing.cast(Any, metrics)  # bug in optree.tree_map typing?
             metrics_i = optree.tree_map(operator.itemgetter(indexing_tuple), _metrics)
             metrics_i = typing.cast(dict[str, Any], metrics_i)
@@ -276,11 +292,58 @@ def wandb_log(
             if step.ndim == len(indexing_tuple)
             else step[run_index]
             if step.ndim == 1
-            else _array_first_value(step, jittable=jittable)
+            else _array_first_value(step, jittable=calling_fn_will_be_jitted)
         )
         _log(wandb_run, metrics_i, step=step_i)
 
     return
+
+
+def wandb_log_under_vmap(
+    wandb_run: NestedSequence[Run],
+    run_index: np.typing.NDArray[np.integer],
+    metrics: dict[str, Any],
+    step: np.typing.NDArray[np.integer],
+):
+    """WIP: Call to wandb.log inside a function that is vmapped, such as a `train_step`-esque function.
+
+    In this scenario:
+    - This function is being vmapped to train multiple runs in parallel.
+    - wandb_run is an array of wandb runs
+    - `metrics` is a dictionary of metrics to log, but it is NOT stacked!
+        - We're only seeing things from the perspective of a single run! (TODO: Unclear why exactly)
+    - We don't know which "run index" we're in, unless `run_index` is passed in.
+    """
+    import jax
+    import jax.experimental
+
+    # jax.debug.print("Vmapped Logging at step {} {} for run {}.", step, metrics, run_index)
+    wandb_run_array = np.asanyarray(wandb_run)
+
+    def log(metrics: dict[str, Any], step: int, run_index: int | tuple[int, ...]):
+        if not isinstance(step, int):
+            step = step.item()
+        run = wandb_run_array[run_index]
+        assert isinstance(run, Run)
+        run.log(metrics, step=step)
+
+    # The metrics should not be stacked!
+    # We're inside vmap, so we should only have the metrics for a single run (really?)
+    assert not _check_shape_prefix(metrics, wandb_run_array.shape)
+
+    jax.experimental.io_callback(
+        log,
+        (),
+        metrics,
+        step=step,
+        run_index=run_index,
+    )
+
+    # wandb_log(
+    #     wandb_run,
+    #     {"train/loss": train_loss, "train/accuracy": accuracy},
+    #     step=step,
+    # )
 
 
 def map_fn_and_log_to_wandb[**P](
@@ -331,6 +394,56 @@ def map_fn_and_log_to_wandb[**P](
             log_fn(wandb_run, grid_pos + (i,), fn, *args_i, **kwargs_i)
 
     log_fn(wandb_run, (), fn, *args, **kwargs)
+
+
+def _merge[T](v1: T, v2: T) -> T:
+    """Merge two values (maybe dictionaries) recursively."""
+    if not isinstance(v1, dict):
+        return v2
+    assert isinstance(v2, dict)  # both should be dicts!
+    # T := dict
+    result = {}
+    for k in v1.keys() | v2.keys():
+        if k not in v1:
+            result[k] = v2[k]
+        elif k not in v2:
+            result[k] = v1[k]
+        else:
+            result[k] = _merge(v1[k], v2[k])
+    return result  # type: ignore
+
+
+def _is_tracer(v: Any) -> bool:
+    if "Tracer" in type(v).__name__:
+        return True
+    return False
+
+
+def _check_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]) -> bool:
+    """Returns `True` if all the entries in `metrics` have a shape that begins with `shape`."""
+
+    def _check_shape(metric: np.typing.ArrayLike):
+        if not hasattr(metric, "shape"):
+            return False
+        metric = typing.cast(np.typing.NDArray, metric)
+        return metric.shape[: len(shape)] == shape
+
+    return optree.tree_all(optree.tree_map(_check_shape, metrics))
+
+
+def _assert_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]) -> M:
+    def _check_shape(metric: np.typing.ArrayLike):
+        if not hasattr(metric, "shape"):
+            return False
+        metric = typing.cast(np.typing.NDArray, metric)
+        if not metric.shape[: len(shape)] == shape:
+            raise ValueError(
+                f"Metric {metric} has shape {metric.shape}, but expected its "
+                f"shape to begin with {shape}"
+            )
+        return metric
+
+    return optree.tree_map(_check_shape, metrics)
 
 
 def _array_first_value(array: np.typing.ArrayLike, jittable: bool = False) -> int:

@@ -20,6 +20,7 @@ uv add parallel_wandb
 
 OR, if you don't use UV yet, you can also `pip install parallel_wandb`.
 
+
 ## Usage
 
 ```python

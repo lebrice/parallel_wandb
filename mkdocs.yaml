@@ -2,6 +2,9 @@ site_name: parallel_wandb Documentation
 theme:
   name: material
 
+site_url: https://lebrice.github.io/parallel_wandb
+repo_url: https://github.com/lebrice/parallel_wandb
+
 markdown_extensions:
   - pymdownx.highlight: # https://squidfunk.github.io/mkdocs-material/reference/code-blocks/#configuration
       anchor_linenums: true
@@ -18,9 +21,10 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          import:
+          inventories:
             - https://docs.pytest.org/en/stable/objects.inv
             - https://docs.python.org/3/objects.inv
+            - https://numpy.org/doc/stable/objects.inv
           options:
             docstring_style: numpy
             members_order: source
