@@ -123,6 +123,13 @@ def test_wandb_log_multiple():
     fake_runs[1].log.assert_called_once_with({"a": 2}, step=1)
 
 
+def test_wandb_log_same_metrics_in_multiple_runs():
+    fake_runs = [mock_run(), mock_run()]
+    wandb_log(fake_runs, {"a": np.asarray([1])}, step=1, metrics_are_stacked=False)
+    fake_runs[0].log.assert_called_once_with({"a": 1}, step=1)
+    fake_runs[1].log.assert_called_once_with({"a": 1}, step=1)
+
+
 def test_wandb_log_multiple_2d():
     fake_runs = [[mock_run(), mock_run(), mock_run()], [mock_run(), mock_run(), mock_run()]]
     wandb_log(fake_runs, {"a": np.arange(6).reshape(2, 3)}, step=np.asarray(1))

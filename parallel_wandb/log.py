@@ -453,7 +453,12 @@ def _slice[*Ts](run_grid_shape: tuple[int, ...], *args: *Ts) -> Iterable[tuple[i
     num_runs = int(np.prod(run_grid_shape))
     for run_index in range(num_runs):
         indexing_tuple = np.unravel_index(run_index, run_grid_shape)
-        args_i = optree.tree_map(operator.itemgetter(indexing_tuple), args)  # type: ignore
+        args_i = optree.tree_map(
+            lambda v: operator.itemgetter(indexing_tuple)(v)
+            if _shape_begins_with(v, run_grid_shape)
+            else v,  # duplicate the metric if it doesn't have the right shape prefix?
+            args,
+        )  # type: ignore
         # kwargs_i = optree.tree_map(operator.itemgetter(indexing_tuple), kwargs)  # type: ignore
         yield (run_index,) + args_i
 
