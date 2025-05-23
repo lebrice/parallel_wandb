@@ -63,7 +63,7 @@ class Args:
 
 def main():
     # Under slurm, this is perfect:
-    if "SLURM_JOB_ID" in os.environ:
+    if "SLURM_JOB_ID" in os.environ and "SLURM_STEP_NODELIST" in os.environ:
         jax.distributed.initialize()
     setup_logging(
         local_rank=jax.process_index(),
@@ -106,15 +106,6 @@ def main():
             f"the global batch size. Setting per-device batch size to {batch_size}."
         )
 
-    # seed = 0
-    # data_seed = 123
-    # step_size = 0.001
-    # num_epochs = 10
-    # batch_size = 128
-    # momentum_mass = 0.9
-    # num_seeds = 4
-    # data_parallel_devices = 2
-
     mesh = jax.make_mesh(
         (jax.device_count() // data_parallel_devices, data_parallel_devices),
         axis_names=("seed", "batch"),
@@ -133,7 +124,7 @@ def main():
         project="parallel_wandb_example",
         group=(
             f"{os.environ['SLURM_JOB_ID']}_{os.environ['SLURM_STEP_ID']}"
-            if "SLURM_JOB_ID" in os.environ
+            if "SLURM_JOB_ID" in os.environ and "SLURM_STEP_ID" in os.environ
             else None
         ),
         config=dict(
@@ -174,106 +165,24 @@ def main():
         in_axes=(0, None, 0),
         axis_name="seed",
     )
-    use_shard_map = False
-    if use_shard_map:
-        jitted_sharded_run_fn = jax.jit(
-            jax.experimental.shard_map.shard_map(
-                multi_seed_data_parallel_run_fn,
-                mesh=mesh,
-                in_specs=(
-                    jax.sharding.PartitionSpec("seed"),
-                    jax.sharding.PartitionSpec("batch"),
-                    jax.sharding.PartitionSpec("seed"),
-                ),
-                out_specs=(
-                    jax.sharding.PartitionSpec(),
-                    jax.sharding.PartitionSpec(),
-                ),
-            ),
-            # in_shardings=(
-            #     NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-            #     NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
-            # ),
-        )
-    else:
-        # Use JIT's `in_shardings`:
-        jitted_sharded_run_fn = jax.jit(
-            multi_seed_data_parallel_run_fn,
-            in_shardings=(
-                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-                NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
-                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-            ),
-            # Replicate the outputs on all devices:
-            out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
-        )
-    final_state, final_test_accs = time_fn(jitted_sharded_run_fn, desc="run")(
+    # Use JIT's `in_shardings` to let jax distribute the data between devices.
+    jitted_sharded_run_fn = jax.jit(
+        multi_seed_data_parallel_run_fn,
+        in_shardings=(
+            NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
+            NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
+            NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
+        ),
+        # Replicate the outputs on all devices:
+        out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    )
+    final_state, final_test_accs = _time_fn(jitted_sharded_run_fn, desc="run")(
         rngs, data_rngs, jnp.arange(num_seeds)
     )
-    rich.pretty.pprint(jax.tree.map(jax.typeof, final_state))
+    logger.info(
+        f"Final state structure: {rich.pretty.pprint(jax.tree.map(jax.typeof, final_state))}"
+    )
     print(f"{final_test_accs=}")
-
-
-def mnist_raw():
-    """Download and parse the raw MNIST dataset."""
-    # CVDF mirror of http://yann.lecun.com/exdb/mnist/
-    base_url = "https://storage.googleapis.com/cvdf-datasets/mnist/"
-
-    def _download(url, filename):
-        """Download a url to a file in the JAX data temp directory."""
-        if not path.exists(_DATA):
-            os.makedirs(_DATA)
-        out_file = path.join(_DATA, filename)
-        if not path.isfile(out_file):
-            urllib.request.urlretrieve(url, out_file)
-            print(f"downloaded {url} to {_DATA}")
-
-    def parse_labels(filename):
-        with gzip.open(filename, "rb") as fh:
-            _ = struct.unpack(">II", fh.read(8))  # type: ignore
-            return np.array(array.array("B", fh.read()), dtype=np.uint8)
-
-    def parse_images(filename):
-        with gzip.open(filename, "rb") as fh:
-            _, num_data, rows, cols = struct.unpack(">IIII", fh.read(16))  # type: ignore
-            return np.array(array.array("B", fh.read()), dtype=np.uint8).reshape(
-                num_data, rows, cols
-            )
-
-    for filename in [
-        "train-images-idx3-ubyte.gz",
-        "train-labels-idx1-ubyte.gz",
-        "t10k-images-idx3-ubyte.gz",
-        "t10k-labels-idx1-ubyte.gz",
-    ]:
-        _download(base_url + filename, filename)
-
-    train_images = parse_images(path.join(_DATA, "train-images-idx3-ubyte.gz"))
-    train_labels = parse_labels(path.join(_DATA, "train-labels-idx1-ubyte.gz"))
-    test_images = parse_images(path.join(_DATA, "t10k-images-idx3-ubyte.gz"))
-    test_labels = parse_labels(path.join(_DATA, "t10k-labels-idx1-ubyte.gz"))
-
-    return train_images, train_labels, test_images, test_labels
-
-
-def mnist():
-    """Download, parse and process MNIST data to unit scale and one-hot labels."""
-    train_images, train_labels, test_images, test_labels = mnist_raw()
-
-    def _partial_flatten(x: np.ndarray) -> np.ndarray:
-        """Flatten all but the first dimension of an ndarray."""
-        return np.reshape(x, (x.shape[0], -1))
-
-    def _one_hot(x: np.ndarray, k: int, dtype=np.float32) -> np.ndarray:
-        """Create a one-hot encoding of x of size k."""
-        return np.array(x[:, None] == np.arange(k), dtype)
-
-    train_images = _partial_flatten(train_images) / np.float32(255.0)
-    test_images = _partial_flatten(test_images) / np.float32(255.0)
-    train_labels = _one_hot(train_labels, 10)
-    test_labels = _one_hot(test_labels, 10)
-
-    return train_images, train_labels, test_images, test_labels
 
 
 def run(
@@ -291,6 +200,7 @@ def run(
     momentum_mass: float | jax.Array = 0.9,
 ):
     num_train_images = train_images.shape[0]
+    num_train_batches = num_train_images // batch_size
 
     # Create the network structure:
     # - `init_random_params` is a function that takes a random key and input shape
@@ -300,7 +210,6 @@ def run(
     init_random_params, predict = stax.serial(
         Dense(1024), Relu, Dense(1024), Relu, Dense(10), LogSoftmax
     )
-    num_train_batches = num_train_images // batch_size
 
     # Create the optimizer:
     # - `opt_init` initializes the optimizer state by 'wrapping' the network parameters
@@ -322,7 +231,6 @@ def run(
         )
         opt_state = opt_update(step, gradients, opt_state)  # type: ignore (step is array, which is fine).
         accuracy = get_accuracy(preds, targets)
-
         accuracy = jax.lax.pmean(accuracy, axis_name="batch")
 
         wandb_log(
@@ -350,22 +258,17 @@ def run(
         assert isinstance(epoch_train_data, jax.Array)
         assert isinstance(epoch_train_labels, jax.Array)
         epoch_start_step = epoch * num_train_batches
-
-        opt_state, (train_losses, _preds) = jax.lax.scan(
+        opt_state, (_train_losses, _preds) = jax.lax.scan(
             update,
             init=opt_state,
             xs=(
-                # update steps
                 epoch_start_step + jnp.arange(num_train_batches),
-                # Data
                 (epoch_train_data, epoch_train_labels),
             ),
             length=num_train_batches,
         )
-
-        params = get_params(opt_state)
-
         # note: forward pass with huge batch size (entire test set). Not ideal!
+        params = get_params(opt_state)
         test_preds = predict(params, test_images)
         test_loss = cross_entropy_loss(test_preds, test_labels)
         test_accuracy = get_accuracy(test_preds, test_labels)
@@ -417,7 +320,69 @@ def get_accuracy(preds: jax.Array, targets: jax.Array):
     return jnp.mean(preds.argmax(-1) == targets.argmax(-1))
 
 
-def time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
+def mnist():
+    """Download, parse and process MNIST data to unit scale and one-hot labels."""
+    train_images, train_labels, test_images, test_labels = _mnist_raw()
+
+    def _partial_flatten(x: np.ndarray) -> np.ndarray:
+        """Flatten all but the first dimension of an ndarray."""
+        return np.reshape(x, (x.shape[0], -1))
+
+    def _one_hot(x: np.ndarray, k: int, dtype=np.float32) -> np.ndarray:
+        """Create a one-hot encoding of x of size k."""
+        return np.array(x[:, None] == np.arange(k), dtype)
+
+    train_images = _partial_flatten(train_images) / np.float32(255.0)
+    test_images = _partial_flatten(test_images) / np.float32(255.0)
+    train_labels = _one_hot(train_labels, 10)
+    test_labels = _one_hot(test_labels, 10)
+
+    return train_images, train_labels, test_images, test_labels
+
+
+def _mnist_raw():
+    """Download and parse the raw MNIST dataset."""
+    # CVDF mirror of http://yann.lecun.com/exdb/mnist/
+    base_url = "https://storage.googleapis.com/cvdf-datasets/mnist/"
+
+    def _download(url, filename):
+        """Download a url to a file in the JAX data temp directory."""
+        if not path.exists(_DATA):
+            os.makedirs(_DATA)
+        out_file = path.join(_DATA, filename)
+        if not path.isfile(out_file):
+            urllib.request.urlretrieve(url, out_file)
+            print(f"downloaded {url} to {_DATA}")
+
+    def parse_labels(filename):
+        with gzip.open(filename, "rb") as fh:
+            _ = struct.unpack(">II", fh.read(8))  # type: ignore
+            return np.array(array.array("B", fh.read()), dtype=np.uint8)
+
+    def parse_images(filename):
+        with gzip.open(filename, "rb") as fh:
+            _, num_data, rows, cols = struct.unpack(">IIII", fh.read(16))  # type: ignore
+            return np.array(array.array("B", fh.read()), dtype=np.uint8).reshape(
+                num_data, rows, cols
+            )
+
+    for filename in [
+        "train-images-idx3-ubyte.gz",
+        "train-labels-idx1-ubyte.gz",
+        "t10k-images-idx3-ubyte.gz",
+        "t10k-labels-idx1-ubyte.gz",
+    ]:
+        _download(base_url + filename, filename)
+
+    train_images = parse_images(path.join(_DATA, "train-images-idx3-ubyte.gz"))
+    train_labels = parse_labels(path.join(_DATA, "train-labels-idx1-ubyte.gz"))
+    test_images = parse_images(path.join(_DATA, "t10k-images-idx3-ubyte.gz"))
+    test_labels = parse_labels(path.join(_DATA, "t10k-labels-idx1-ubyte.gz"))
+
+    return train_images, train_labels, test_images, test_labels
+
+
+def _time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
     desc = desc or fn.__name__
 
     @functools.wraps(fn)
@@ -450,21 +415,13 @@ def setup_logging(local_rank: int, num_processes: int, verbose: int):
                 console=console, show_time=console is not None, rich_tracebacks=True, markup=True
             )
         ],
-        force=True,
     )
-    if verbose == 0:
-        # logger.setLevel(logging.ERROR)
-        logger.setLevel(logging.WARNING)
-        package_logger.setLevel(logging.WARNING)
-    elif verbose == 1:
-        logger.setLevel(logging.INFO)
-        package_logger.setLevel(logging.INFO)
-    elif verbose >= 2:
-        logger.setLevel(logging.DEBUG)
-        package_logger.setLevel(logging.DEBUG)
-    # else:
-    #     assert verbose >= 3
-
+    logger.setLevel(
+        logging.DEBUG if verbose >= 2 else logging.INFO if verbose == 1 else logging.WARNING
+    )
+    package_logger.setLevel(
+        logging.DEBUG if verbose >= 2 else logging.INFO if verbose == 1 else logging.WARNING
+    )
     logging.getLogger("jax").setLevel(
         logging.DEBUG if verbose == 3 else logging.INFO if verbose == 2 else logging.WARNING
     )

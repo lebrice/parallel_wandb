@@ -145,15 +145,11 @@ def test_wandb_log_with_vmap():
 
     with pytest.raises(ValueError, match="need to pass the `run_index` argument"):
 
-        def _fn(x):
+        def _fn1(x):
             wandb_log(fake_runs, {"a": x}, step=x)
             return x + 1
 
-        outs = jax.vmap(_fn)(jnp.arange(3))
-        np.testing.assert_array_equal(outs, jnp.arange(1, 4))
-        fake_runs[0].log.assert_called_once_with({"a": 0}, step=0)
-        fake_runs[1].log.assert_called_once_with({"a": 1}, step=1)
-        fake_runs[2].log.assert_called_once_with({"a": 2}, step=2)
+        outs = jax.vmap(_fn1)(jnp.arange(3))
 
     def _fn(x, run_index: jax.Array):
         wandb_log(fake_runs, {"a": x}, step=x, run_index=run_index)

@@ -259,7 +259,6 @@ def wandb_log(
         return _log(wandb_run, metrics, step)
 
     wandb_runs = np.asanyarray(wandb_run)
-    num_runs = np.prod(wandb_runs.shape)
 
     def _check_shape(metric: Any):
         if not metric.shape[: len(wandb_runs.shape)] == wandb_runs.shape:
@@ -271,6 +270,7 @@ def wandb_log(
     metrics = optree.tree_map(_check_shape, metrics)
 
     # non-recursive version that indexes using the multi-dimensional metrics.
+    num_runs = np.prod(wandb_runs.shape)
     for run_index in range(num_runs):
         indexing_tuple = np.unravel_index(run_index, wandb_runs.shape)
         wandb_run = wandb_runs[indexing_tuple]
@@ -301,9 +301,9 @@ def wandb_log(
 
 def wandb_log_under_vmap(
     wandb_run: NestedSequence[Run],
-    run_index: np.typing.NDArray[np.integer],
+    run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike,
     metrics: dict[str, Any],
-    step: np.typing.NDArray[np.integer],
+    step: np.typing.NDArray[np.integer] | np.typing.ArrayLike,
 ):
     """WIP: Call to wandb.log inside a function that is vmapped, such as a `train_step`-esque function.
 
@@ -356,6 +356,9 @@ def map_fn_and_log_to_wandb[**P](
 ):
     """Map a function over the (sliced) arg and kwargs and log the results to wandb.
 
+    This is meant to be used to log things like wandb tables, images and such, that
+    need to be created with the data from each run.
+
     `fn` should be a function that takes a grid position (tuple of ints) in addition
     to args and kwargs, then return a dictionary of stuff to log to wandb.
 
@@ -394,6 +397,16 @@ def map_fn_and_log_to_wandb[**P](
             log_fn(wandb_run, grid_pos + (i,), fn, *args_i, **kwargs_i)
 
     log_fn(wandb_run, (), fn, *args, **kwargs)
+
+
+def _slice(run_grid_shape: tuple[int, ...], *args: Any, **kwargs: Any):
+    """Yields the sliced args and kwargs for each run in the grid."""
+    num_runs = np.prod(run_grid_shape)
+    for run_index in range(num_runs):
+        indexing_tuple = np.unravel_index(run_index, run_grid_shape)
+        args_i = optree.tree_map(operator.itemgetter(indexing_tuple), args)  # type: ignore
+        kwargs_i = optree.tree_map(operator.itemgetter(indexing_tuple), kwargs)  # type: ignore
+        yield run_index, args_i, kwargs_i
 
 
 def _merge[T](v1: T, v2: T) -> T:
