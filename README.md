@@ -1,7 +1,8 @@
 # parallel_wandb
 
 This simple package shows how to use the new feature of Weights & Biases (wandb)
-for parallel runs: [`reinit="create_new"`](https://docs.wandb.ai/guides/runs/multiple-runs-per-process/#example-concurrent-processes).
+for parallel runs: [`reinit="create_new"`](https://docs.wandb.ai/guides/runs/multiple-runs-per-process/#example-concurrent-processes)
+in combination with `jax.vmap` for extremely efficient training (and logging!) of multiple simultaneous training runs. 
 
 - It provides simple functions to initialize multiple wandb runs and log data to them in parallel.
 - The `wandb_log` function can also be used in combination with `jax.vmap` for highly efficient training of multiple models at once, now with Wandb logging!
