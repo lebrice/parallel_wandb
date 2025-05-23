@@ -1,17 +1,19 @@
 """Functions that make it easy to create and log metrics to multiple wandb runs in parallel."""
 
+import functools
 import inspect
 import operator
 import os
 import typing
 from collections.abc import Callable, Sequence
 from logging import getLogger
-from typing import Any, Concatenate, Mapping, TypeVar
+from typing import Any, Concatenate, Iterable, Mapping, TypeVar
 
 import numpy as np
 import optree
 import optree.accessor
 import wandb
+from optree import PyTree
 from wandb.sdk.wandb_run import Run
 
 T = TypeVar("T")
@@ -174,79 +176,79 @@ def default_run_suffix_fn(grid_pos: tuple[int, ...], grid_shape: tuple[int, ...]
 def wandb_log(
     wandb_run: Run | NestedSequence[Run],
     metrics: dict[str, Any],
-    # run_index: tuple[int, ...] | None = None,
     step: int | np.typing.NDArray[np.integer] | np.typing.ArrayLike,
     run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
     metrics_are_stacked: bool | None = None,
 ):
-    """Log metrics to wandb.
+    """Log metrics to wandb using `wandb.log` for each run in `wandb_run`.
 
-
-
-    Doesn't work under jax.jit unless `jittable` is set to True.
+    If `metrics_are_stacked` is False, the metrics are logged to every run.
     """
+
     wandb_run_array = np.asanyarray(wandb_run)
+    multiple_runs = wandb_run_array.size > 1
 
-    # TODO: Do we need the `step` and `metrics` to both be (or not be) traced?
-    # If not, then we should probably adapt the code below to handle the case where step is not a tracer,
-    # otherwise we might get some errors I think.
-    calling_fn_will_be_jitted = optree.tree_all(optree.tree_map(_is_tracer, (metrics, step)))
-    logger.debug(f"Calling function will be jitted: {calling_fn_will_be_jitted}")
-
-    if metrics_are_stacked is None:
+    if multiple_runs and metrics_are_stacked is None:
         metrics_are_stacked = _check_shape_prefix(metrics, wandb_run_array.shape)
 
-    if calling_fn_will_be_jitted and wandb_run_array.ndim >= 1 and not metrics_are_stacked:
+    # TODO: Probably won't work correctly if only one of `step` or `metrics` is traced.
+    this_is_being_traced = optree.tree_any(optree.tree_map(_is_tracer, (metrics, step)))  # type: ignore
+    this_is_being_vmapped = this_is_being_traced and multiple_runs and metrics_are_stacked is False
+    if this_is_being_traced:
+        logger.debug(
+            f"Logging to wandb under a tracing context: {wandb_run_array.shape=}, "
+            f"{metrics_are_stacked=}, {this_is_being_vmapped=}"
+        )
+
+    if this_is_being_vmapped:
         # Multiple wandb_runs and metrics are for a single run, this is probably being called
         # from a function that is (or is going to be?) vmapped.
         logger.debug(
             f"Assuming that the calling function is vmapped since {wandb_run_array.ndim=} and {metrics_are_stacked=}"
         )
-        if isinstance(wandb_run, Run):
-            raise ValueError(
-                "It is assumed that the function calling this is being vmapped, "
-                "so `wandb_run` is expected to be an array or a (possibly-nested) "
-                "sequence of Wandb Run objects."
-            )
         # There are multiple wandb runs, and metrics are not stacked
         # (dont have the wandb_runs shape as a prefix in their shapes)
         # --> This is probably being called inside a function that is being vmapped!
         if run_index is None:
             raise ValueError(
-                f"There are multiple wandb runs, and metrics are not stacked "
+                f"There are multiple wandb runs, some metrics are tracers, and metrics are not stacked "
                 f"(they dont have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
-                f"This means that you are likely calling `{wandb_log.__name__}` inside a function "
-                f"that is being vmapped!\n"
-                f"In this case, and since we can't tell at which 'index' in the vmap we're at, "
-                f"you also need to pass the `run_index` argument. "
-                f"This will be used to index into the `wandb_runs` array to select which run to log at.\n"
+                f"This indicates that you are likely calling `{wandb_log.__name__}` inside a function "
+                f"that is being vmapped, which is great!\n"
+                f"However, since we can't tell at which 'index' in the vmap we're at, "
+                f"you need to pass the `run_index` argument. "
+                f"This array will be used to index into `wandb_runs` to select which run to log at.\n"
                 f"`run_index=jnp.arange(num_seeds)` is a good option.\n"
-                f"See the `jax_mnist.py` file example in the `parallel_wandb` repo for an example.\n"
-                f"Metric shapes: {optree.tree_map(operator.attrgetter('shape'), metrics)}"
+                f"See the `jax_mnist.py` example in the GitHub repo for an example.\n"
+                f"Metric shapes: {optree.tree_map(operator.attrgetter('shape'), metrics)}"  # type: ignore
             )
-        return wandb_log_under_vmap(wandb_run, run_index=run_index, metrics=metrics, step=step)
 
-    # Assume it's the same timestep for all runs for simplicity?
-    # if not isinstance(step, int):
-    #     if jittable:
-    #         step = step.flatten()[0]  # type: ignore
-    #     else:
-    #         step = np.asarray(step).flatten()[0].item()
-    #         assert isinstance(step, int)
-    def _log(wandb_run: Run, metrics: dict[str, Any], step: int | np.typing.ArrayLike):
+        assert not isinstance(wandb_run, Run)
+        return wandb_log_under_vmap(wandb_run, metrics=metrics, step=step, run_index=run_index)
+
+    def log(wandb_run: Run, metrics: dict[str, Any], step: int | np.typing.ArrayLike):
         """Base case: single run, simple dict of metrics."""
-        if calling_fn_will_be_jitted:
+        if this_is_being_traced:
             import jax.experimental  # type: ignore
-
-            # IDEA: use regular wandb_run.log when not in a jit context?
-            # import jax.core  # type: ignore
-            # _metrics = typing.cast(Any, metrics)  # bug in optree.tree_map typing?
-            # if not optree.tree_any(optree.tree_map(lambda v: isinstance(v, jax.core.Tracer), (_metrics, step))):
-            #     # No need to use an external callback: apparently not under Jit context!
-            #     wandb_run.log(metrics, step=step)
-
             # IDEA: Try using the sharding argument to io_callback to only log from the first device?
-            return jax.experimental.io_callback(wandb_run.log, (), metrics, step=step)
+
+            # TODO: Wandb docs say: "The step must always increase, and it is not
+            # possible to log to a previous step." (https://docs.wandb.ai/ref/python/log/#the-wb-step)
+            # This implies that our approach with io_callback(ordered=False) is wrong!
+            # However, it does seem to work just fine in practice.. 🤔
+            if not _is_tracer(step):
+                step = int(step.item())
+                return jax.experimental.io_callback(
+                    lambda _metrics: wandb_run.log(_metrics, step=step), (), metrics
+                )
+            if not optree.tree_all(optree.tree_map(_is_tracer, metrics)):
+                return jax.experimental.io_callback(
+                    lambda _step: wandb_run.log(metrics, step=_step), (), step
+                )
+            # Everything is a tracer.
+            # TODO: actually, part of the metrics could be tracers, and part not.
+            return jax.experimental.io_callback(wandb_run.log, (), metrics, step)
+
         if isinstance(step, np.ndarray) or (
             hasattr(step, "ndim") and callable(getattr(step, "item", None))
         ):
@@ -255,48 +257,42 @@ def wandb_log(
         assert isinstance(step, int), step
         return wandb_run.log(metrics, step=step)
 
-    if isinstance(wandb_run, Run):
-        return _log(wandb_run, metrics, step)
-
-    wandb_runs = np.asanyarray(wandb_run)
-
-    def _check_shape(metric: Any):
-        if not metric.shape[: len(wandb_runs.shape)] == wandb_runs.shape:
-            raise ValueError(
-                f"Metric {metric} has shape {metric.shape}, but expected its shape to begin with {wandb_runs.shape}"
-            )
-        return metric
-
-    metrics = optree.tree_map(_check_shape, metrics)
+    if wandb_run_array.size == 1:
+        wandb_run = wandb_run if isinstance(wandb_run, Run) else wandb_run_array.item()
+        assert isinstance(wandb_run, Run)
+        return log(wandb_run=wandb_run, metrics=metrics, step=step)
 
     # non-recursive version that indexes using the multi-dimensional metrics.
-    num_runs = np.prod(wandb_runs.shape)
-    for run_index in range(num_runs):
-        indexing_tuple = np.unravel_index(run_index, wandb_runs.shape)
-        wandb_run = wandb_runs[indexing_tuple]
-        assert isinstance(wandb_run, Run)
-        if not metrics_are_stacked:
-            # Log the same metrics in all runs.
-            metrics_i = metrics
-        else:
-            # logger.info("Run index: %s, metrics: %s", run_index, jax.tree.map(jax.typeof, metrics))
-            # return
-            _metrics = typing.cast(Any, metrics)  # bug in optree.tree_map typing?
-            metrics_i = optree.tree_map(operator.itemgetter(indexing_tuple), _metrics)
-            metrics_i = typing.cast(dict[str, Any], metrics_i)
-
-        step_i = (
-            step
-            if isinstance(step, int) or (step.ndim == 0)
-            else step[indexing_tuple]
-            if step.ndim == len(indexing_tuple)
-            else step[run_index]
-            if step.ndim == 1
-            else _array_first_value(step, jittable=calling_fn_will_be_jitted)
-        )
-        _log(wandb_run, metrics_i, step=step_i)
+    _num_runs = np.prod(wandb_run_array.shape)
+    for run_index, wandb_run_i, metrics_i in _slice(
+        wandb_run_array.shape, wandb_run_array, metrics
+    ):
+        assert isinstance(wandb_run_i, Run)
+        indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
+        # todo: re-enable this use-case: log the same metrics in all runs.
+        # if not metrics_are_stacked:
+        #     metrics_i = metrics
+        # logger.info("Run index: %s, metrics: %s", run_index, jax.tree.map(jax.typeof, metrics))
+        step_i = _get_step(step, indexing_tuple)
+        log(wandb_run_i, metrics=metrics_i, step=step_i)
 
     return
+
+
+def _get_step(
+    step: int | np.typing.ArrayLike, indexing_tuple: tuple[int, ...] | tuple[np.intp, ...]
+):
+    if isinstance(step, int) or not hasattr(step, "shape"):
+        return step
+    step = typing.cast(np.typing.NDArray, step)
+    if step.ndim == 0:
+        if _is_tracer(step):
+            # Under jax.jit we can't call .item() on a tracer.
+            # The step will become an int once inside the io_callback.
+            return step
+        return step.item()
+    assert step.ndim == len(indexing_tuple)
+    return step[indexing_tuple]
 
 
 def wandb_log_under_vmap(
@@ -312,7 +308,7 @@ def wandb_log_under_vmap(
     - wandb_run is an array of wandb runs
     - `metrics` is a dictionary of metrics to log, but it is NOT stacked!
         - We're only seeing things from the perspective of a single run! (TODO: Unclear why exactly)
-    - We don't know which "run index" we're in, unless `run_index` is passed in.
+    - We don't know which "run index" we're in --> `run_index` needs to be passed in.
     """
     import jax
     import jax.experimental
@@ -328,7 +324,8 @@ def wandb_log_under_vmap(
         run.log(metrics, step=step)
 
     # The metrics should not be stacked!
-    # We're inside vmap, so we should only have the metrics for a single run (really?)
+    # We're inside vmap, so we should only have the metrics for a single run
+    # (Not 100% clear why though).
     assert not _check_shape_prefix(metrics, wandb_run_array.shape)
 
     jax.experimental.io_callback(
@@ -337,27 +334,23 @@ def wandb_log_under_vmap(
         metrics,
         step=step,
         run_index=run_index,
+        # TODO: look at the sharding argument to io_callback to only log from the first device?
+        # Seems incompatible with vmap though for some reason?
     )
-
-    # wandb_log(
-    #     wandb_run,
-    #     {"train/loss": train_loss, "train/accuracy": accuracy},
-    #     step=step,
-    # )
 
 
 def map_fn_and_log_to_wandb[**P](
     wandb_run: Run | NestedSequence[Run],
+    fn: Callable[Concatenate[int, int, P], dict[str, Any]],
     step: int | np.typing.ArrayLike,
-    fn: Callable[Concatenate[tuple[int, ...], P], dict[str, Any]],
-    jittable: bool = False,
+    run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
     *args: P.args,
     **kwargs: P.kwargs,
 ):
     """Map a function over the (sliced) arg and kwargs and log the results to wandb.
 
     This is meant to be used to log things like wandb tables, images and such, that
-    need to be created with the data from each run.
+    need to be created with the data of each run.
 
     `fn` should be a function that takes a grid position (tuple of ints) in addition
     to args and kwargs, then return a dictionary of stuff to log to wandb.
@@ -370,43 +363,99 @@ def map_fn_and_log_to_wandb[**P](
 
     This works recursively, so the `wandb_run` can be a list of list of wandb runs, etc.
     """
-    # Assume it's the same timestep for all runs, otherwise things might be tricky.
-    if not isinstance(step, int):
-        step = _array_first_value(step, jittable=jittable)
+    wandb_run_array = np.asanyarray(wandb_run)
+    multiple_runs = wandb_run_array.size > 1
+    this_is_being_traced = optree.tree_any(optree.tree_map(_is_tracer, (wandb_run, step)))  # type: ignore
 
-    def log_fn[**P2](
-        wandb_run: Run | NestedSequence[Run],
-        grid_pos: tuple[int, ...],
-        fn: Callable[Concatenate[tuple[int, ...], P2], dict[str, Any]],
-        *args: P2.args,
-        **kwargs: P2.kwargs,
+    def log(
+        wandb_run: Run,
+        step: int | np.typing.ArrayLike,
+        run_index: int,
+        num_runs: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
     ):
-        if not isinstance(wandb_run, Sequence):
-            metrics = fn(grid_pos, *args, **kwargs)
-            # Base case: single run, single metric.
-            logger.debug(
-                "Logging to wandb run %s: metrics=%s step=%s", wandb_run.name, metrics, step
+        """Base case: single run, simple dict of metrics."""
+        if isinstance(step, np.ndarray) or (
+            hasattr(step, "ndim") and callable(getattr(step, "item", None))
+        ):
+            assert step.ndim == 0, step  # type: ignore
+            step = step.item()  # type: ignore
+        metrics = fn(run_index, num_runs, *args, **kwargs)
+        assert isinstance(step, int), step
+        wandb_run.log(metrics, step=step)
+
+    if not multiple_runs:
+        wandb_run = wandb_run if isinstance(wandb_run, Run) else wandb_run_array.item()
+        assert isinstance(wandb_run, Run)
+        if this_is_being_traced:
+            import jax.experimental  # type: ignore
+
+            assert _is_tracer(step), "assuming step is also a tracer for now."
+            return jax.experimental.io_callback(
+                lambda _step, *_args, **_kwargs: log(wandb_run, _step, 0, 1, *_args, **_kwargs),
+                (),
+                step,
+                *args,
+                **kwargs,
             )
-            wandb_run.log(metrics, step=step)
-            return
-        for i, wandb_run in enumerate(wandb_run):
-            # operator.itemgetter(i)
-            args_i = optree.tree_map(operator.itemgetter(i), args)
-            kwargs_i = optree.tree_map(operator.itemgetter(i), kwargs)
-            # Recurse
-            log_fn(wandb_run, grid_pos + (i,), fn, *args_i, **kwargs_i)
+        return log(wandb_run, step, 0, 1, *args, **kwargs)
 
-    log_fn(wandb_run, (), fn, *args, **kwargs)
+    num_runs = wandb_run_array.size
+    for run_index, wandb_run_i, args_i, kwargs_i in _slice(
+        wandb_run_array.shape, wandb_run_array, args, kwargs
+    ):
+        indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
+        step_i = _get_step(step, indexing_tuple)
+        if this_is_being_traced:
+            import jax.experimental  # type: ignore
+
+            assert _is_tracer(step_i), "assuming step is also a tracer for now."
+            jax.experimental.io_callback(
+                lambda _step, *_args_i, **_kwargs_i: log(
+                    wandb_run_i, _step, run_index, num_runs, *_args_i, **_kwargs_i
+                ),
+                (),
+                step_i,
+                *args_i,
+                *kwargs_i,
+            )
+        else:
+            log(wandb_run_i, step_i, run_index, num_runs, *args_i, **kwargs_i)
+    return
+    # Everything is a tracer.
+    # TODO: actually, part of the metrics could be tracers, and part not.
+
+    def log_fn(
+        wandb_run: Run,
+        step: int,
+        run_index: int,
+        num_runs: int,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ):
+        metrics = fn(run_index, num_runs, *args, **kwargs)
+        # Base case: single run, single metric.
+        logger.debug("Logging to wandb run %s: metrics=%s step=%s", wandb_run.name, metrics, step)
+        wandb_run.log(metrics, step=step)
+        return
+
+    for run_index, wandb_run_i, args_i, kwargs_i in _slice(
+        wandb_run_array.shape, wandb_run_array, args, kwargs
+    ):
+        indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
+        step_i = _get_step(step, indexing_tuple)
+        log_fn(wandb_run_i, step_i, run_index, wandb_run_array.size, *args_i, **kwargs_i)
 
 
-def _slice(run_grid_shape: tuple[int, ...], *args: Any, **kwargs: Any):
+def _slice[*Ts](run_grid_shape: tuple[int, ...], *args: *Ts) -> Iterable[tuple[int, *Ts]]:
     """Yields the sliced args and kwargs for each run in the grid."""
-    num_runs = np.prod(run_grid_shape)
+    num_runs = int(np.prod(run_grid_shape))
     for run_index in range(num_runs):
         indexing_tuple = np.unravel_index(run_index, run_grid_shape)
         args_i = optree.tree_map(operator.itemgetter(indexing_tuple), args)  # type: ignore
-        kwargs_i = optree.tree_map(operator.itemgetter(indexing_tuple), kwargs)  # type: ignore
-        yield run_index, args_i, kwargs_i
+        # kwargs_i = optree.tree_map(operator.itemgetter(indexing_tuple), kwargs)  # type: ignore
+        yield (run_index,) + args_i
 
 
 def _merge[T](v1: T, v2: T) -> T:
@@ -432,16 +481,18 @@ def _is_tracer(v: Any) -> bool:
     return False
 
 
-def _check_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]) -> bool:
+def _check_shape_prefix(metrics: PyTree[Any], shape: tuple[int, ...]) -> bool:
     """Returns `True` if all the entries in `metrics` have a shape that begins with `shape`."""
+    fn = functools.partial(_shape_begins_with, prefix=shape)
+    return optree.tree_all(optree.tree_map(fn, metrics))
 
-    def _check_shape(metric: np.typing.ArrayLike):
-        if not hasattr(metric, "shape"):
-            return False
-        metric = typing.cast(np.typing.NDArray, metric)
-        return metric.shape[: len(shape)] == shape
 
-    return optree.tree_all(optree.tree_map(_check_shape, metrics))
+def _shape_begins_with(metric: np.typing.ArrayLike, prefix: tuple[int, ...]) -> bool:
+    """Returns `True` if `metric` has a shape that begins with `prefix`."""
+    if not hasattr(metric, "shape"):
+        return False
+    metric = typing.cast(np.typing.NDArray, metric)
+    return metric.shape[: len(prefix)] == prefix
 
 
 def _assert_shape_prefix[M: Mapping[str, Any]](metrics: M, shape: tuple[int, ...]) -> M:

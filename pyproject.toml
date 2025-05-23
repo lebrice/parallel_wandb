@@ -23,6 +23,7 @@ dev = [
     "jax[cuda12]>=0.6.0; sys_platform == 'linux'",
     "rich>=14.0.0",
     "simple-parsing>=0.1.7",
+    "pillow>=11.2.1",
 ]
 
 [tool.pytest.ini_options]
