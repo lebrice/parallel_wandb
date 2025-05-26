@@ -25,9 +25,6 @@ from typing import Callable
 
 import einops
 import jax
-import jax.experimental
-import jax.experimental.multihost_utils
-import jax.experimental.shard_map
 import jax.numpy as jnp
 import numpy as np
 import rich.logging
@@ -181,7 +178,7 @@ def main():
         rngs, data_rngs, jnp.arange(num_seeds)
     )
     logger.info(
-        f"Final state structure: {rich.pretty.pprint(jax.tree.map(jax.typeof, final_state))}"
+        f"Final state structure:\n{rich.pretty.pretty_repr(jax.tree.map(jax.typeof, final_state))}"
     )
     print(f"{final_test_accs=}")
 

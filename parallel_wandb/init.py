@@ -98,6 +98,10 @@ def wandb_init[**P](
     if not stacked_overrides:
         return np.asanyarray(_base_case(*args, **kwargs))
 
+    # Not binding to `_wandb_init` directly to more easily use a mock in tests.
+    sig = inspect.signature(wandb.init)
+    base_bound_args = sig.bind_partial(*args, **kwargs)
+
     stacked_overrides = stacked_overrides or {}
     _stacked_overrides = typing.cast(Any, stacked_overrides)  # typing bug in optree?
     accessors, overrides, _overrides_treedef = optree.tree_flatten_with_accessor(
@@ -116,9 +120,7 @@ def wandb_init[**P](
 
     shape = overrides[0].shape  # assumed shared across all overrides.
     n_runs = int(np.prod(shape))
-    # TODO: signature of `wandb.init` and `_wandb_init` are different during tests, could cause issues!
-    sig = inspect.signature(_wandb_init)
-    base_bound_args = sig.bind_partial(*args, **kwargs)
+
     runs = []
     for run_index in range(n_runs):
         # Unravel the index to get the position in the grid.
@@ -146,6 +148,7 @@ def wandb_init[**P](
             override_bound_args.arguments,
             override_kwargs,
         )
+        assert "kwargs" not in override_arguments, override_arguments
         b = sig.bind_partial(
             **override_arguments,
         )
