@@ -39,7 +39,8 @@ from jax.example_libraries.optimizers import OptimizerState, Params
 from jax.example_libraries.stax import Dense, LogSoftmax, Relu
 from wandb.sdk.wandb_run import Run
 
-from parallel_wandb.log import NestedSequence, wandb_init, wandb_log
+from parallel_wandb.init import wandb_init
+from parallel_wandb.log import NestedSequence, wandb_log
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
