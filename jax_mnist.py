@@ -289,7 +289,7 @@ def run(
                         "image",
                         "guess",
                         "truth",
-                        *("score_" + str(i) for i in range(10)),
+                        *(f"score_{i}" for i in range(probabilities.shape[-1])),
                     ],
                     data=[
                         [
@@ -306,8 +306,8 @@ def run(
             step=(epoch + 1) * num_train_batches,
             run_index=run_index,
             images=einops.rearrange(test_images[:n_rows_in_table], "n h w -> n 1 h w"),
-            targets=test_labels[:n_rows_in_table],
-            predictions=test_preds[:n_rows_in_table].argmax(1),
+            targets=test_labels[:n_rows_in_table].argmax(-1),
+            predictions=test_preds[:n_rows_in_table].argmax(-1),
             # network outputs come from log_softmax
             probabilities=jnp.exp(test_preds[:n_rows_in_table]),
         )

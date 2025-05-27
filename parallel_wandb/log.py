@@ -187,7 +187,7 @@ def _merge[T](v1: T, v2: T) -> T:
     return result  # type: ignore
 
 
-def _check_shape_prefix(metrics: dict[str, Any], shape: tuple[int, ...]) -> bool:
+def _check_shape_prefix(metrics: Any, shape: tuple[int, ...]) -> bool:
     """Returns `True` if all the entries in `metrics` have a shape that begins with `shape`."""
     fn = functools.partial(shape_begins_with, prefix=shape)
     return optree.tree_all(optree.tree_map(fn, metrics))
