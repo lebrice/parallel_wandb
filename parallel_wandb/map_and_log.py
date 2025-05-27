@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from typing import Any, Concatenate
 
@@ -6,6 +7,8 @@ import optree
 from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.utils import NestedSequence, get_step, is_tracer, slice
+
+logger = logging.getLogger(__name__)
 
 
 def map_fn_and_log_to_wandb[**P](

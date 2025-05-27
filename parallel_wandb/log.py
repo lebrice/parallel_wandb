@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 import optree
-from optree import PyTree
 from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.utils import NestedSequence, get_step, is_tracer, shape_begins_with, slice
@@ -20,33 +19,35 @@ def wandb_log(
     metrics: dict[str, Any],
     step: int | np.typing.NDArray[np.integer] | np.typing.ArrayLike,
     run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
-    metrics_are_stacked: bool | None = None,
+    same_metrics_for_all_runs: bool | None = None,
 ):
     """Log metrics to wandb using `wandb.log` for each run in `wandb_run`.
 
-    If `metrics_are_stacked` is False, the metrics are logged to every run.
+    If `log_metric_to_all_runs` is False, the metrics are logged to every run.
     """
 
     wandb_run_array = np.asanyarray(wandb_run)
     multiple_runs = wandb_run_array.size > 1
 
-    if multiple_runs and metrics_are_stacked is None:
-        metrics_are_stacked = _check_shape_prefix(metrics, wandb_run_array.shape)
+    if multiple_runs and same_metrics_for_all_runs is None:
+        same_metrics_for_all_runs = _check_shape_prefix(metrics, wandb_run_array.shape)  # type: ignore
 
     # TODO: Probably won't work correctly if only one of `step` or `metrics` is traced.
     this_is_being_traced = optree.tree_any(optree.tree_map(is_tracer, (metrics, step)))  # type: ignore
-    this_is_being_vmapped = this_is_being_traced and multiple_runs and metrics_are_stacked is False
+    this_is_being_vmapped = (
+        this_is_being_traced and multiple_runs and same_metrics_for_all_runs is False
+    )
     if this_is_being_traced:
         logger.debug(
             f"Logging to wandb under a tracing context: {wandb_run_array.shape=}, "
-            f"{metrics_are_stacked=}, {this_is_being_vmapped=}"
+            f"{same_metrics_for_all_runs=}, {this_is_being_vmapped=}"
         )
 
     if this_is_being_vmapped:
         # Multiple wandb_runs and metrics are for a single run, this is probably being called
         # from a function that is (or is going to be?) vmapped.
         logger.debug(
-            f"Assuming that the calling function is vmapped since {wandb_run_array.ndim=} and {metrics_are_stacked=}"
+            f"Assuming that the calling function is vmapped since {wandb_run_array.ndim=} and {same_metrics_for_all_runs=}"
         )
         # There are multiple wandb runs, and metrics are not stacked
         # (dont have the wandb_runs shape as a prefix in their shapes)
@@ -185,7 +186,7 @@ def _merge[T](v1: T, v2: T) -> T:
     return result  # type: ignore
 
 
-def _check_shape_prefix(metrics: PyTree[Any], shape: tuple[int, ...]) -> bool:
+def _check_shape_prefix(metrics: dict[str, Any], shape: tuple[int, ...]) -> bool:
     """Returns `True` if all the entries in `metrics` have a shape that begins with `shape`."""
     fn = functools.partial(shape_begins_with, prefix=shape)
     return optree.tree_all(optree.tree_map(fn, metrics))

@@ -3,7 +3,7 @@
 This simple package makes it easy to use the new ([`reinit="create_new"`](https://docs.wandb.ai/guides/runs/multiple-runs-per-process/#example-concurrent-processes))
 feature of Weights & Biases (wandb) to create and log to multiple wandb runs in parallel
 
-This, when combined with `jax.vmap`, enables extremely efficient, high-throughput training (**and logging**!) of multiple simultaneous training runs. 
+This, when combined with `jax.vmap`, enables extremely efficient, high-throughput training (**and logging**!) of multiple simultaneous training runs.
 
 - This package provides two simple functions that you can import and use in your own project: `wandb_init` to initialize multiple wandb runs and `wandb_log` to log metrics to them in parallel.
 - A demonstration of how these can be used with jax.vmap can be found in `jax_mnist.py`.
