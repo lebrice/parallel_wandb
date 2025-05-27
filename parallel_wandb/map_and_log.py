@@ -7,6 +7,7 @@ import numpy as np
 import optree
 from wandb.sdk.wandb_run import Run
 
+from parallel_wandb.log import _check_shape_prefix
 from parallel_wandb.utils import NestedSequence, get_step, is_tracer, slice
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def map_fn_and_log_to_wandb[**P](
     multiple_runs = wandb_run_array.size > 1
     this_is_being_traced = optree.tree_any(optree.tree_map(is_tracer, (wandb_run, step)))  # type: ignore
     logger.debug(f"Logging to wandb with {wandb_run_array.shape=} and {this_is_being_traced=}")
+    metrics_are_stacked = _check_shape_prefix(metrics, wandb_run_array.shape)
 
     def log(
         wandb_run: Run,
@@ -59,7 +61,7 @@ def map_fn_and_log_to_wandb[**P](
         assert isinstance(step, int), step
         wandb_run.log(metrics, step=step)
 
-    if not multiple_runs:
+    if not multiple_runs and not metrics_are_stacked:
         wandb_run = wandb_run if isinstance(wandb_run, Run) else wandb_run_array.item()
         assert isinstance(wandb_run, Run)
         if this_is_being_traced:
@@ -75,6 +77,33 @@ def map_fn_and_log_to_wandb[**P](
             )
         return log(wandb_run, step, 0, 1, *args, **kwargs)
 
+    if multiple_runs and not metrics_are_stacked and this_is_being_traced:
+        logger.debug(
+            f"This is probably being called from a function that is being vmapped since {multiple_runs=}, {metrics_are_stacked=}"
+        )
+        if run_index is None:
+            raise ValueError(
+                f"There are multiple wandb runs, some metrics are tracers, and metrics are not stacked "
+                f"(they dont have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
+                f"This indicates that you are likely calling `{map_fn_and_log_to_wandb.__name__}` inside a function "
+                f"that is being vmapped, which is great!\n"
+                f"However, since we can't tell at which 'index' in the vmap we're at, "
+                f"you need to pass the `run_index` argument. "
+                f"This array will be used to index into `wandb_runs` to select which run to log at.\n"
+                f"`run_index=jnp.arange(num_seeds)` is a good option.\n"
+                f"See the `jax_mnist.py` example in the GitHub repo for an example.\n"
+                f"Metric shapes: {optree.tree_map(operator.attrgetter('shape'), metrics)}"  # type: ignore
+            )
+        import jax.experimental  # type: ignore
+
+        raise NotImplementedError(
+            "TODO! Equivalent of `log_under_vmap` with an additional function to be called inside the io_callback."
+        )
+        # wandb_log_under_vmap(
+        #     wandb_run,
+        #     run_index,
+        # )
+
     num_runs = wandb_run_array.size
     for run_index, wandb_run_i, args_i, kwargs_i in slice(
         wandb_run_array.shape,
@@ -89,7 +118,7 @@ def map_fn_and_log_to_wandb[**P](
         if this_is_being_traced:
             import jax.experimental  # type: ignore
 
-            logger.debug("args_i=%s, kwargs_i=%s, ", args_i, kwargs_i)
+            # logger.debug("args_i=%s, kwargs_i=%s, ", args_i, kwargs_i)
             assert is_tracer(step_i), "assuming step is also a tracer for now."
             jax.experimental.io_callback(
                 functools.partial(log, wandb_run_i, run_index, num_runs),

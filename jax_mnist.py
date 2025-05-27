@@ -282,7 +282,7 @@ def run(
         n_rows_in_table = 20
         map_fn_and_log_to_wandb(
             wandb_run,
-            fn=lambda run_index, num_runs, images, targets, predicted, probabilities: {
+            fn=lambda run_index, num_runs, images, targets, predictions, probabilities: {
                 "test_prediction": wandb.Table(
                     columns=[
                         "id",
@@ -294,8 +294,8 @@ def run(
                     data=[
                         [
                             i,
-                            wandb.Image(image, classes=[targets[i]]),
-                            predicted[i],
+                            wandb.Image(np.asarray(image), caption=f"Test sample {i}"),
+                            predictions[i],
                             targets[i],
                             *probabilities[i],
                         ]
@@ -307,12 +307,9 @@ def run(
             run_index=run_index,
             images=einops.rearrange(test_images[:n_rows_in_table], "n h w -> n 1 h w"),
             targets=test_labels[:n_rows_in_table],
-            # outputs=test_preds[:n_rows_in_table],
-            predicted=test_preds[:n_rows_in_table].argmax(-1),
+            predictions=test_preds[:n_rows_in_table].argmax(1),
             # network outputs come from log_softmax
             probabilities=jnp.exp(test_preds[:n_rows_in_table]),
-            # predictions=test_preds[:20],
-            # targets=test_labels[:20],
         )
         wandb_log(
             wandb_run,
