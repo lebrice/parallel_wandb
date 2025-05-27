@@ -112,7 +112,8 @@ def wandb_log(
         wandb_run_array,
         metrics,
         # todo: Make this an argument for a more precise and predictable behaviour?
-        strict=False,
+        # strict=False,
+        strict=(not same_metrics_for_all_runs) if same_metrics_for_all_runs is not None else True,
     ):
         assert isinstance(wandb_run_i, Run)
         indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)

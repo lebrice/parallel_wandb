@@ -28,12 +28,14 @@ def test_wandb_log_same_metrics_in_multiple_runs():
     fake_runs = [mock_run(), mock_run()]
 
     # TODO: Should we let indexing errors be raised if we don't set the flag?
-    with pytest.raises(IndexError):
-        wandb_log(fake_runs, {"a": np.asarray([1])}, step=1, same_metrics_for_all_runs=False)
-        fake_runs[0].log.assert_called_once_with({"a": 1}, step=1)
-        fake_runs[1].log.assert_called_once_with({"a": 1}, step=1)
+    with pytest.raises((IndexError, TypeError)):
+        wandb_log(fake_runs, {"a": 1, "b": np.arange(2)}, step=1, same_metrics_for_all_runs=False)
+        fake_runs[0].log.assert_called_once_with({"a": 1, "b": np.arange(2)}, step=1)
+        fake_runs[1].log.assert_called_once_with({"a": 1, "b": np.arange(2)}, step=1)
 
-    wandb_log(fake_runs, {"a": np.asarray([1])}, step=1, same_metrics_for_all_runs=False)
+    for _mock in fake_runs:
+        _mock.reset_mock()
+    wandb_log(fake_runs, {"a": np.asarray([1])}, step=1, same_metrics_for_all_runs=True)
     fake_runs[0].log.assert_called_once_with({"a": 1}, step=1)
     fake_runs[1].log.assert_called_once_with({"a": 1}, step=1)
 
