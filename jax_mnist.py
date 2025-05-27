@@ -25,9 +25,6 @@ from typing import Callable
 
 import einops
 import jax
-import jax.experimental
-import jax.experimental.multihost_utils
-import jax.experimental.shard_map
 import jax.numpy as jnp
 import numpy as np
 import rich.logging
@@ -39,7 +36,8 @@ from jax.example_libraries.optimizers import OptimizerState, Params
 from jax.example_libraries.stax import Dense, LogSoftmax, Relu
 from wandb.sdk.wandb_run import Run
 
-from parallel_wandb.log import NestedSequence, wandb_init, wandb_log
+from parallel_wandb.init import wandb_init
+from parallel_wandb.log import NestedSequence, wandb_log
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -180,7 +178,7 @@ def main():
         rngs, data_rngs, jnp.arange(num_seeds)
     )
     logger.info(
-        f"Final state structure: {rich.pretty.pprint(jax.tree.map(jax.typeof, final_state))}"
+        f"Final state structure:\n{rich.pretty.pretty_repr(jax.tree.map(jax.typeof, final_state))}"
     )
     print(f"{final_test_accs=}")
 
