@@ -1,3 +1,4 @@
+import functools
 import logging
 from collections.abc import Callable
 from typing import Any, Concatenate
@@ -38,12 +39,13 @@ def map_fn_and_log_to_wandb[**P](
     wandb_run_array = np.asanyarray(wandb_run)
     multiple_runs = wandb_run_array.size > 1
     this_is_being_traced = optree.tree_any(optree.tree_map(is_tracer, (wandb_run, step)))  # type: ignore
+    logger.debug(f"Logging to wandb with {wandb_run_array.shape=} and {this_is_being_traced=}")
 
     def log(
         wandb_run: Run,
-        step: int | np.typing.ArrayLike,
         run_index: int,
         num_runs: int,
+        step: int | np.typing.ArrayLike,
         *args: P.args,
         **kwargs: P.kwargs,
     ):
@@ -65,7 +67,7 @@ def map_fn_and_log_to_wandb[**P](
 
             assert is_tracer(step), "assuming step is also a tracer for now."
             return jax.experimental.io_callback(
-                lambda _step, *_args, **_kwargs: log(wandb_run, _step, 0, 1, *_args, **_kwargs),
+                functools.partial(log, wandb_run, 0, 1),
                 (),
                 step,
                 *args,
@@ -75,25 +77,29 @@ def map_fn_and_log_to_wandb[**P](
 
     num_runs = wandb_run_array.size
     for run_index, wandb_run_i, args_i, kwargs_i in slice(
-        wandb_run_array.shape, wandb_run_array, args, kwargs
+        wandb_run_array.shape,
+        wandb_run_array,
+        args,
+        kwargs,
+        strict=True,
     ):
+        assert isinstance(wandb_run_i, Run), wandb_run_i
         indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
         step_i = get_step(step, indexing_tuple)
         if this_is_being_traced:
             import jax.experimental  # type: ignore
 
+            logger.debug("args_i=%s, kwargs_i=%s, ", args_i, kwargs_i)
             assert is_tracer(step_i), "assuming step is also a tracer for now."
             jax.experimental.io_callback(
-                lambda _step, *_args_i, **_kwargs_i: log(
-                    wandb_run_i, _step, run_index, num_runs, *_args_i, **_kwargs_i
-                ),
+                functools.partial(log, wandb_run_i, run_index, num_runs),
                 (),
                 step_i,
                 *args_i,
-                *kwargs_i,
+                **kwargs_i,
             )
         else:
-            log(wandb_run_i, step_i, run_index, num_runs, *args_i, **kwargs_i)
+            log(wandb_run_i, run_index, num_runs, step_i, *args_i, **kwargs_i)
     return
     # Everything is a tracer.
     # TODO: actually, part of the metrics could be tracers, and part not.

@@ -30,6 +30,7 @@ import numpy as np
 import rich.logging
 import rich.pretty
 import simple_parsing
+import wandb
 from jax import NamedSharding
 from jax.example_libraries import optimizers, stax
 from jax.example_libraries.optimizers import OptimizerState, Params
@@ -38,6 +39,7 @@ from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.init import wandb_init
 from parallel_wandb.log import NestedSequence, wandb_log
+from parallel_wandb.map_and_log import map_fn_and_log_to_wandb
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -57,6 +59,7 @@ class Args:
     num_seeds: int = 1
     data_parallel_devices: int = 1
     args_are_per_device: bool = False
+    jit: bool = True
 
 
 def main():
@@ -163,17 +166,20 @@ def main():
         in_axes=(0, None, 0),
         axis_name="seed",
     )
-    # Use JIT's `in_shardings` to let jax distribute the data between devices.
-    jitted_sharded_run_fn = jax.jit(
-        multi_seed_data_parallel_run_fn,
-        in_shardings=(
-            NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-            NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
-            NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-        ),
-        # Replicate the outputs on all devices:
-        out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
-    )
+    if args.jit:
+        # Use JIT's `in_shardings` to let jax distribute the data between devices.
+        jitted_sharded_run_fn = jax.jit(
+            multi_seed_data_parallel_run_fn,
+            in_shardings=(
+                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
+                NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
+                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
+            ),
+            # Replicate the outputs on all devices:
+            out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
+        )
+    else:
+        jitted_sharded_run_fn = multi_seed_data_parallel_run_fn
     final_state, final_test_accs = _time_fn(jitted_sharded_run_fn, desc="run")(
         rngs, data_rngs, jnp.arange(num_seeds)
     )
@@ -206,7 +212,7 @@ def run(
     # - `predict` is a function that takes parameters and inputs and returns
     #    the predicted outputs.
     init_random_params, predict = stax.serial(
-        Dense(1024), Relu, Dense(1024), Relu, Dense(10), LogSoftmax
+        stax.Flatten, Dense(1024), Relu, Dense(1024), Relu, Dense(10), LogSoftmax
     )
 
     # Create the optimizer:
@@ -273,7 +279,41 @@ def run(
 
         test_loss = jax.lax.pmean(test_loss, axis_name="batch")
         test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
-
+        n_rows_in_table = 20
+        map_fn_and_log_to_wandb(
+            wandb_run,
+            fn=lambda run_index, num_runs, images, targets, predicted, probabilities: {
+                "test_prediction": wandb.Table(
+                    columns=[
+                        "id",
+                        "image",
+                        "guess",
+                        "truth",
+                        *("score_" + str(i) for i in range(10)),
+                    ],
+                    data=[
+                        [
+                            i,
+                            wandb.Image(image, classes=[targets[i]]),
+                            predicted[i],
+                            targets[i],
+                            *probabilities[i],
+                        ]
+                        for i, image in enumerate(images)
+                    ],
+                ),
+            },
+            step=(epoch + 1) * num_train_batches,
+            run_index=run_index,
+            images=einops.rearrange(test_images[:n_rows_in_table], "n h w -> n 1 h w"),
+            targets=test_labels[:n_rows_in_table],
+            # outputs=test_preds[:n_rows_in_table],
+            predicted=test_preds[:n_rows_in_table].argmax(-1),
+            # network outputs come from log_softmax
+            probabilities=jnp.exp(test_preds[:n_rows_in_table]),
+            # predictions=test_preds[:20],
+            # targets=test_labels[:20],
+        )
         wandb_log(
             wandb_run,
             {"test/loss": test_loss, "accuracy": test_accuracy},
@@ -292,6 +332,45 @@ def run(
     )
     jax.debug.print("Final test accuracy for run {}: {}", run_index, test_accuracies[-1])
     return opt_state, test_accuracies[-1]
+
+
+def get_test_predictions_table(
+    images: jax.Array, labels: jax.Array, outputs: jax.Array, predicted: jax.Array
+):
+    # ✨ W&B: Create a Table to store predictions for each test step
+    test_table = wandb.Table(
+        columns=["id", "image", "guess", "truth", *("score_" + str(i) for i in range(10))]
+    )
+
+    # convenience funtion to log predictions for a batch of test images
+    def log_test_predictions(
+        images: jax.Array,
+        labels: jax.Array,
+        outputs: jax.Array,
+        predicted: jax.Array,
+        test_table,
+        log_counter,
+    ):
+        """Taken from these urls:
+        - https://colab.research.google.com/github/wandb/examples/blob/master/colabs/datasets-predictions/W&B_Tables_Quickstart.ipynb#scrollTo=hgeXfCR575H0
+        More specifically: https://wandb.ai/stacey/table-quickstart/runs/2ao7yrxx/code/_session_history.ipynb
+        """
+        # obtain confidence scores for all classes
+        scores = jax.nn.softmax(outputs.data, 1)
+        log_scores = np.asarray(scores)
+        log_images = np.asarray(images)
+        log_labels = np.asarray(labels)
+        log_preds = np.asarray(predicted)
+        # adding ids based on the order of the images
+        _id = 0
+        for i, l, p, s in zip(log_images, log_labels, log_preds, log_scores):
+            # add required info to data table:
+            # id, image pixels, model's guess, true label, scores for all classes
+            img_id = str(_id) + "_" + str(log_counter)
+            test_table.add_data(img_id, wandb.Image(i), p, l, *s)
+            _id += 1
+            if _id == NUM_IMAGES_PER_BATCH:
+                break
 
 
 def loss(
@@ -330,8 +409,10 @@ def mnist():
         """Create a one-hot encoding of x of size k."""
         return np.array(x[:, None] == np.arange(k), dtype)
 
-    train_images = _partial_flatten(train_images) / np.float32(255.0)
-    test_images = _partial_flatten(test_images) / np.float32(255.0)
+    # train_images = _partial_flatten(train_images) / np.float32(255.0)
+    # test_images = _partial_flatten(test_images) / np.float32(255.0)
+    train_images = train_images / np.float32(255.0)
+    test_images = test_images / np.float32(255.0)
     train_labels = _one_hot(train_labels, 10)
     test_labels = _one_hot(test_labels, 10)
 
@@ -395,10 +476,8 @@ def _time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
 
 
 def setup_logging(local_rank: int, num_processes: int, verbose: int):
-    # Widen the log width when running in an sbatch script.
-    from parallel_wandb.log import logger as package_logger
-
     if not sys.stdout.isatty():
+        # Widen the log width when running in an sbatch script.
         console = rich.console.Console(width=140)
     else:
         console = None
@@ -417,7 +496,7 @@ def setup_logging(local_rank: int, num_processes: int, verbose: int):
     logger.setLevel(
         logging.DEBUG if verbose >= 2 else logging.INFO if verbose == 1 else logging.WARNING
     )
-    package_logger.setLevel(
+    logging.getLogger("parallel_wandb").setLevel(
         logging.DEBUG if verbose >= 2 else logging.INFO if verbose == 1 else logging.WARNING
     )
     logging.getLogger("jax").setLevel(
