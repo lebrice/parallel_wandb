@@ -55,7 +55,7 @@ def map_fn_and_log_to_wandb[**P](
         """Base case: single run, simple dict of metrics."""
         if not isinstance(wandb_run, Run):
             indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
-            wandb_run = wandb_run[indexing_tuple]
+            wandb_run = np.asarray(wandb_run)[indexing_tuple]
         if isinstance(step, np.ndarray) or (
             hasattr(step, "ndim") and callable(getattr(step, "item", None))
         ):
@@ -116,8 +116,8 @@ def map_fn_and_log_to_wandb[**P](
             *args,
             **kwargs,
         )
+        return
 
-    return
     num_runs = wandb_run_array.size
     for run_index, wandb_run_i, args_i, kwargs_i in slice(
         wandb_run_array.shape,
