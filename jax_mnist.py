@@ -180,7 +180,12 @@ def main():
         )
     else:
         jitted_sharded_run_fn = multi_seed_data_parallel_run_fn
-    final_state, final_test_accs = _time_fn(jitted_sharded_run_fn, desc="run")(
+
+    def _jit_fn(fn):
+        return fn.lower(rngs, data_rngs, jnp.arange(num_seeds)).compile()
+
+    jitted_fn = _time_fn(_jit_fn, desc="jit")(jitted_sharded_run_fn)
+    final_state, final_test_accs = _time_fn(jitted_fn, desc="run")(
         rngs, data_rngs, jnp.arange(num_seeds)
     )
     logger.info(
