@@ -35,6 +35,7 @@ def test_jax_mnist_example(
     )
 
     # Set command-line arguments
+    import jax
 
     monkeypatch.setattr(
         sys,
@@ -45,6 +46,8 @@ def test_jax_mnist_example(
             "2",
             "--num_seeds",
             str(num_seeds),
+            "--data_parallel_devices",
+            str(jax.device_count() if num_seeds == 1 else 1),
         ],
     )
     jax_mnist.main()
