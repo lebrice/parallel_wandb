@@ -59,7 +59,6 @@ class Args:
     num_seeds: int = 1
     data_parallel_devices: int = 1
     args_are_per_device: bool = False
-    jit: bool = True
 
 
 def main():
@@ -156,36 +155,28 @@ def main():
         test_labels=test_labels,
         wandb_run=wandb_run,
     )
-    data_parallel_run_fn = jax.vmap(
+    # Add data parallelism:
+    run_fn = jax.vmap(run_fn, in_axes=(None, 0, None), axis_name="batch")
+    # Run multiple seeds in parallel with vmap:
+    run_fn = jax.vmap(run_fn, in_axes=(0, None, 0), axis_name="seed")
+
+    def _sharding(*spec: str | None) -> NamedSharding:
+        return NamedSharding(mesh, jax.sharding.PartitionSpec(*spec))
+
+    # Use JIT's `in_shardings` to let jax distribute the data between devices.
+    # Replicate the outputs on all devices.
+    run_fn = jax.jit(
         run_fn,
-        in_axes=(None, 0, None),
-        axis_name="batch",
+        in_shardings=(_sharding("seed"), _sharding("batch"), _sharding("seed")),
+        out_shardings=_sharding(),
     )
-    multi_seed_data_parallel_run_fn = jax.vmap(
-        data_parallel_run_fn,
-        in_axes=(0, None, 0),
-        axis_name="seed",
-    )
-    if args.jit:
-        # Use JIT's `in_shardings` to let jax distribute the data between devices.
-        jitted_sharded_run_fn = jax.jit(
-            multi_seed_data_parallel_run_fn,
-            in_shardings=(
-                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-                NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
-                NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-            ),
-            # Replicate the outputs on all devices:
-            out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
-        )
-    else:
-        jitted_sharded_run_fn = multi_seed_data_parallel_run_fn
 
-    def _jit_fn(fn):
-        return fn.lower(rngs, data_rngs, jnp.arange(num_seeds)).compile()
+    def _jit_fn(run_fn):
+        return run_fn.lower(rngs, data_rngs, jnp.arange(num_seeds)).compile()
 
-    jitted_fn = _time_fn(_jit_fn, desc="jit")(jitted_sharded_run_fn)
-    final_state, final_test_accs = _time_fn(jitted_fn, desc="run")(
+    run_fn = _time_fn(_jit_fn, desc="jit")(run_fn)
+
+    final_state, final_test_accs = _time_fn(run_fn, desc="run")(
         rngs, data_rngs, jnp.arange(num_seeds)
     )
     logger.info(
@@ -241,7 +232,6 @@ def run(
         opt_state = opt_update(step, gradients, opt_state)  # type: ignore (step is array, which is fine).
         accuracy = get_accuracy(preds, targets)
         accuracy = jax.lax.pmean(accuracy, axis_name="batch")
-
         wandb_log(
             wandb_run,
             metrics={"train/loss": train_loss, "train/accuracy": accuracy},
@@ -285,6 +275,7 @@ def run(
         test_loss = jax.lax.pmean(test_loss, axis_name="batch")
         test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
         n_rows_in_table = 20
+
         map_fn_and_log_to_wandb(
             wandb_run,
             fn=lambda run_index, num_runs, images, targets, predictions, probabilities: {

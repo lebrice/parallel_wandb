@@ -1,7 +1,6 @@
 import functools
 import logging
 from collections.abc import Callable
-import operator
 from typing import Any, Concatenate
 
 import numpy as np

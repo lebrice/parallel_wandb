@@ -11,8 +11,12 @@ import wandb
 from parallel_wandb.init import wandb_init
 
 
+@pytest.mark.parametrize("num_seeds", [1, 2])
 def test_jax_mnist_example(
-    monkeypatch: pytest.MonkeyPatch, mocker: pytest_mock.MockFixture, tmp_path: Path
+    num_seeds: int,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: pytest_mock.MockFixture,
+    tmp_path: Path,
 ):
     """Run the jax_mnist example."""
     monkeypatch.setenv("WANDB_MODE", "offline")  # Avoid actual online WandB logging during tests
@@ -32,11 +36,16 @@ def test_jax_mnist_example(
 
     # Set command-line arguments
 
-    num_seeds = 4
     monkeypatch.setattr(
         sys,
         "argv",
-        [Path(jax_mnist.__file__).name, "--num_epochs", "2", "--num_seeds", str(num_seeds)],
+        [
+            Path(jax_mnist.__file__).name,
+            "--num_epochs",
+            "2",
+            "--num_seeds",
+            str(num_seeds),
+        ],
     )
     jax_mnist.main()
 
