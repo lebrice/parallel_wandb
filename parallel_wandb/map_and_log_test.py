@@ -77,17 +77,11 @@ def test_map_and_log_to_wandb(jit: bool):
     assert len(fake_run.log.call_args) == 2
     assert wandb_Image.call_count == 2
     assert fake_run.log.call_count == 2
-    # fake_run.log.assert_any_call(
-    #     # Seems like this comparison doesn't work:
-    #     # {"image": unittest.mock.ANY},
-    #     unittest.mock.ANY,
-    #     step=0,
-    # )
-    # fake_run.log.assert_any_call(
-    #     # {"image": unittest.mock.ANY},
-    #     unittest.mock.ANY,
-    #     step=1,
-    # )
+
+    # weird, for some reason the assert_any_call doesnt work with step=1?
+    fake_run.log.assert_any_call({"image": unittest.mock.ANY}, step=0)
+    # fake_run.log.assert_any_call({"image": unittest.mock.ANY}, step=1)
+
     if fake_run.log.call_args_list[0].kwargs["step"] == 0:
         # Callback with logs of first step came in first
         np.testing.assert_array_equal(
