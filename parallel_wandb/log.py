@@ -27,6 +27,8 @@ def wandb_log(
     """
 
     wandb_run_array = np.asanyarray(wandb_run)
+    if all(run.disabled for run in wandb_run_array.flatten()):
+        return
     multiple_runs = wandb_run_array.size > 1
 
     if multiple_runs and same_metrics_for_all_runs is None:

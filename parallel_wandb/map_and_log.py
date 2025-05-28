@@ -38,6 +38,8 @@ def map_fn_and_log_to_wandb[**P](
     This works recursively, so the `wandb_run` can be a list of list of wandb runs, etc.
     """
     wandb_run_array = np.asanyarray(wandb_run)
+    if all(run.disabled for run in wandb_run_array.flatten()):
+        return
     multiple_runs = wandb_run_array.size > 1
     this_is_being_traced = optree.tree_any(optree.tree_map(is_tracer, (wandb_run, step)))  # type: ignore
     logger.debug(f"Logging to wandb with {wandb_run_array.shape=} and {this_is_being_traced=}")
