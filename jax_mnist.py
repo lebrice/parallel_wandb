@@ -331,45 +331,6 @@ def run(
     return opt_state, test_accuracies[-1]
 
 
-def get_test_predictions_table(
-    images: jax.Array, labels: jax.Array, outputs: jax.Array, predicted: jax.Array
-):
-    # ✨ W&B: Create a Table to store predictions for each test step
-    test_table = wandb.Table(
-        columns=["id", "image", "guess", "truth", *("score_" + str(i) for i in range(10))]
-    )
-
-    # convenience funtion to log predictions for a batch of test images
-    def log_test_predictions(
-        images: jax.Array,
-        labels: jax.Array,
-        outputs: jax.Array,
-        predicted: jax.Array,
-        test_table,
-        log_counter,
-    ):
-        """Taken from these urls:
-        - https://colab.research.google.com/github/wandb/examples/blob/master/colabs/datasets-predictions/W&B_Tables_Quickstart.ipynb#scrollTo=hgeXfCR575H0
-        More specifically: https://wandb.ai/stacey/table-quickstart/runs/2ao7yrxx/code/_session_history.ipynb
-        """
-        # obtain confidence scores for all classes
-        scores = jax.nn.softmax(outputs.data, 1)
-        log_scores = np.asarray(scores)
-        log_images = np.asarray(images)
-        log_labels = np.asarray(labels)
-        log_preds = np.asarray(predicted)
-        # adding ids based on the order of the images
-        _id = 0
-        for i, l, p, s in zip(log_images, log_labels, log_preds, log_scores):
-            # add required info to data table:
-            # id, image pixels, model's guess, true label, scores for all classes
-            img_id = str(_id) + "_" + str(log_counter)
-            test_table.add_data(img_id, wandb.Image(i), p, l, *s)
-            _id += 1
-            if _id == NUM_IMAGES_PER_BATCH:
-                break
-
-
 def loss(
     params: Params,
     inputs: jax.Array,
