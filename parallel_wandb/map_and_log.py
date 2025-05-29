@@ -92,7 +92,7 @@ def map_fn_and_log_to_wandb[**P](
         if run_index is None:
             raise ValueError(
                 f"There are multiple wandb runs, some metrics are tracers, and metrics are not stacked "
-                f"(they dont have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
+                f"(they don't have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
                 f"This indicates that you are likely calling `{map_fn_and_log_to_wandb.__name__}` inside a function "
                 f"that is being vmapped, which is great!\n"
                 f"However, since we can't tell at which 'index' in the vmap we're at, "
