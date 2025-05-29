@@ -78,7 +78,7 @@ def test_map_and_log_to_wandb(jit: bool):
     assert wandb_Image.call_count == 2
     assert fake_run.log.call_count == 2
 
-    # weird, for some reason the assert_any_call doesnt work with step=1?
+    # weird, for some reason the assert_any_call doesn't work with step=1?
     fake_run.log.assert_any_call({"image": unittest.mock.ANY}, step=0)
     # fake_run.log.assert_any_call({"image": unittest.mock.ANY}, step=1)
 
