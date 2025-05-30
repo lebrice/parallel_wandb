@@ -8,7 +8,7 @@ from .log import wandb_log
 
 
 def mock_run():
-    return Mock(spec=Run)
+    return Mock(spec=Run, disabled=False)
 
 
 def test_wandb_log_single_run():

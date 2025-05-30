@@ -11,41 +11,51 @@ import wandb
 from parallel_wandb.init import wandb_init
 
 
+@pytest.mark.parametrize("num_seeds", [1, 2])
 def test_jax_mnist_example(
-    monkeypatch: pytest.MonkeyPatch, mocker: pytest_mock.MockFixture, tmp_path: Path
+    num_seeds: int,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: pytest_mock.MockFixture,
+    tmp_path: Path,
 ):
     """Run the jax_mnist example."""
-    monkeypatch.setenv("WANDB_MODE", "offline")  # Avoid actual online WandB logging during tests
-    monkeypatch.setenv("WANDB_DIR", str(tmp_path))
 
-    _wandb_init = mocker.Mock(spec_set=True, spec=wandb.init, wraps=wandb.init)
-    # mocker.patch("wandb.init", return_value=_wandb_init)
+    _wandb_init = mocker.Mock(
+        spec_set=True,
+        spec=wandb.init,
+        wraps=wandb.init,
+    )
+    import jax
     import jax_mnist
 
-    # TODO: Problem is that this is stuck as the default in the wandb_init signature,
-    # so patching wandb.init or the module attribute has no effect!
+    # Set some arguments so we don't actually log to wandb online and use the temp test dir.
     monkeypatch.setattr(
         jax_mnist,
         wandb_init.__name__,
-        functools.partial(wandb_init, _wandb_init=_wandb_init),
+        functools.partial(wandb_init, _wandb_init=_wandb_init, dir=tmp_path, mode="offline"),
     )
 
     # Set command-line arguments
-
-    num_seeds = 4
     monkeypatch.setattr(
         sys,
         "argv",
-        [Path(jax_mnist.__file__).name, "--num_epochs", "2", "--num_seeds", str(num_seeds)],
+        [
+            Path(jax_mnist.__file__).name,
+            "--num_epochs",
+            "2",
+            "--num_seeds",
+            str(num_seeds),
+            "--data_parallel_devices",
+            str(jax.device_count() if num_seeds == 1 else 1),
+        ],
     )
     jax_mnist.main()
 
     _wandb_init.assert_called()
     assert _wandb_init.call_count == num_seeds
-
     wandb_dir = tmp_path / "wandb"
-    assert wandb_dir.exists()
 
+    assert wandb_dir.exists()
     # One offline run per seed.
     # There's also a `wandb/latest-run` symlink which we ignore.
     run_dirs = list(f for f in wandb_dir.iterdir() if f.is_dir() and not f.is_symlink())

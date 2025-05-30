@@ -30,6 +30,7 @@ import numpy as np
 import rich.logging
 import rich.pretty
 import simple_parsing
+import wandb
 from jax import NamedSharding
 from jax.example_libraries import optimizers, stax
 from jax.example_libraries.optimizers import OptimizerState, Params
@@ -38,6 +39,7 @@ from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.init import wandb_init
 from parallel_wandb.log import NestedSequence, wandb_log
+from parallel_wandb.map_and_log import map_fn_foreach_run
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -153,28 +155,28 @@ def main():
         test_labels=test_labels,
         wandb_run=wandb_run,
     )
-    data_parallel_run_fn = jax.vmap(
-        run_fn,
-        in_axes=(None, 0, None),
-        axis_name="batch",
-    )
-    multi_seed_data_parallel_run_fn = jax.vmap(
-        data_parallel_run_fn,
-        in_axes=(0, None, 0),
-        axis_name="seed",
-    )
+    # Add data parallelism:
+    run_fn = jax.vmap(run_fn, in_axes=(None, 0, None), axis_name="batch")
+    # Run multiple seeds in parallel with vmap:
+    run_fn = jax.vmap(run_fn, in_axes=(0, None, 0), axis_name="seed")
+
+    def _sharding(*spec: str | None) -> NamedSharding:
+        return NamedSharding(mesh, jax.sharding.PartitionSpec(*spec))
+
     # Use JIT's `in_shardings` to let jax distribute the data between devices.
-    jitted_sharded_run_fn = jax.jit(
-        multi_seed_data_parallel_run_fn,
-        in_shardings=(
-            NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-            NamedSharding(mesh, jax.sharding.PartitionSpec("batch")),
-            NamedSharding(mesh, jax.sharding.PartitionSpec("seed")),
-        ),
-        # Replicate the outputs on all devices:
-        out_shardings=NamedSharding(mesh, jax.sharding.PartitionSpec()),
+    # Replicate the outputs on all devices.
+    run_fn = jax.jit(
+        run_fn,
+        in_shardings=(_sharding("seed"), _sharding("batch"), _sharding("seed")),
+        out_shardings=_sharding(),
     )
-    final_state, final_test_accs = _time_fn(jitted_sharded_run_fn, desc="run")(
+
+    def _jit_fn(run_fn):
+        return run_fn.lower(rngs, data_rngs, jnp.arange(num_seeds)).compile()
+
+    run_fn = _time_fn(_jit_fn, desc="jit")(run_fn)
+
+    final_state, final_test_accs = _time_fn(run_fn, desc="run")(
         rngs, data_rngs, jnp.arange(num_seeds)
     )
     logger.info(
@@ -206,7 +208,7 @@ def run(
     # - `predict` is a function that takes parameters and inputs and returns
     #    the predicted outputs.
     init_random_params, predict = stax.serial(
-        Dense(1024), Relu, Dense(1024), Relu, Dense(10), LogSoftmax
+        stax.Flatten, Dense(1024), Relu, Dense(1024), Relu, Dense(10), LogSoftmax
     )
 
     # Create the optimizer:
@@ -230,7 +232,6 @@ def run(
         opt_state = opt_update(step, gradients, opt_state)  # type: ignore (step is array, which is fine).
         accuracy = get_accuracy(preds, targets)
         accuracy = jax.lax.pmean(accuracy, axis_name="batch")
-
         wandb_log(
             wandb_run,
             metrics={"train/loss": train_loss, "train/accuracy": accuracy},
@@ -274,6 +275,48 @@ def run(
         test_loss = jax.lax.pmean(test_loss, axis_name="batch")
         test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
 
+        # Log some test predictions to Weights & Biases.
+        # The `Image` and `Table` objects shouldn't be created in a JIT-ed function.
+        # Here the function that we pass will be executed in an io_callback.
+        n_rows_in_table = 20
+        images = einops.rearrange(test_images[:n_rows_in_table], "n h w -> n 1 h w")
+        targets = test_labels[:n_rows_in_table].argmax(-1)
+        predictions = test_preds[:n_rows_in_table].argmax(-1)
+        # network outputs come from log_softmax
+        probabilities = jnp.exp(test_preds[:n_rows_in_table])
+        map_fn_foreach_run(
+            wandb_run,
+            fn=lambda ctx, images, targets, predictions, probabilities: ctx.run.log(
+                {
+                    "test_prediction": wandb.Table(
+                        columns=[
+                            "id",
+                            "image",
+                            "prediction",
+                            "target",
+                            *(f"score_{i}" for i in range(probabilities.shape[-1])),
+                        ],
+                        data=[
+                            [
+                                i,
+                                wandb.Image(np.asarray(image), caption=f"Test sample {i}"),
+                                predictions[i],
+                                targets[i],
+                                *probabilities[i],
+                            ]
+                            for i, image in enumerate(images)
+                        ],
+                    ),
+                },
+                step=ctx.step,
+            ),
+            step=(epoch + 1) * num_train_batches,
+            run_index=run_index,
+            images=images,
+            targets=targets,
+            predictions=predictions,
+            probabilities=probabilities,
+        )
         wandb_log(
             wandb_run,
             {"test/loss": test_loss, "accuracy": test_accuracy},
@@ -330,8 +373,10 @@ def mnist():
         """Create a one-hot encoding of x of size k."""
         return np.array(x[:, None] == np.arange(k), dtype)
 
-    train_images = _partial_flatten(train_images) / np.float32(255.0)
-    test_images = _partial_flatten(test_images) / np.float32(255.0)
+    # train_images = _partial_flatten(train_images) / np.float32(255.0)
+    # test_images = _partial_flatten(test_images) / np.float32(255.0)
+    train_images = train_images / np.float32(255.0)
+    test_images = test_images / np.float32(255.0)
     train_labels = _one_hot(train_labels, 10)
     test_labels = _one_hot(test_labels, 10)
 
@@ -395,10 +440,8 @@ def _time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
 
 
 def setup_logging(local_rank: int, num_processes: int, verbose: int):
-    # Widen the log width when running in an sbatch script.
-    from parallel_wandb.log import logger as package_logger
-
     if not sys.stdout.isatty():
+        # Widen the log width when running in an sbatch script.
         console = rich.console.Console(width=140)
     else:
         console = None
@@ -417,7 +460,7 @@ def setup_logging(local_rank: int, num_processes: int, verbose: int):
     logger.setLevel(
         logging.DEBUG if verbose >= 2 else logging.INFO if verbose == 1 else logging.WARNING
     )
-    package_logger.setLevel(
+    logging.getLogger("parallel_wandb").setLevel(
         logging.DEBUG if verbose >= 2 else logging.INFO if verbose == 1 else logging.WARNING
     )
     logging.getLogger("jax").setLevel(
