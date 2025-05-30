@@ -182,10 +182,8 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
     fake_runs[1].log.assert_any_call({"image": unittest.mock.ANY}, step=20)
     assert wandb_Image.call_count == 4
 
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[0].args,
-        (jnp.asarray(0), 2),
+    assert _log_image.call_args_list[0].args == (
+        LogContext(run_index=jnp.asarray(0, dtype=jnp.int32), num_runs=2, step=0),
     )
     optree.tree_map(
         np.testing.assert_array_equal,
@@ -193,31 +191,26 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
         {"data": _make_image(jax.random.key(0))},
     )
 
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[1].args,
-        (jnp.asarray(1), 2),
+    assert _log_image.call_args_list[1].args == (
+        LogContext(run_index=jnp.asarray(1, dtype=jnp.int32), num_runs=2, step=10),
     )
+
     optree.tree_map(
         np.testing.assert_array_equal,
         _log_image.call_args_list[1].kwargs,
         {"data": _make_image(jax.random.key(1))},
     )
 
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[2].args,
-        (jnp.asarray(0), 2),
+    assert _log_image.call_args_list[2].args == (
+        LogContext(run_index=jnp.asarray(0, dtype=jnp.int32), num_runs=2, step=10),
     )
     optree.tree_map(
         np.testing.assert_array_equal,
         _log_image.call_args_list[2].kwargs,
         {"data": _make_image(jax.random.key(100))},
     )
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[3].args,
-        (jnp.asarray(1), 2),
+    assert _log_image.call_args_list[3].args == (
+        LogContext(run_index=jnp.asarray(1, dtype=jnp.int32), num_runs=2, step=20),
     )
     optree.tree_map(
         np.testing.assert_array_equal,
