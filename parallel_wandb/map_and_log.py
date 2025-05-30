@@ -165,23 +165,14 @@ def map_fn_foreach_run(
         # )
 
         num_runs = wandb_run_array.size
-        if is_tracer(step):
-            jax.experimental.io_callback(
-                functools.partial(log, wandb_run, num_runs=num_runs),
-                (),
-                step,
-                run_index,
-                *args,
-                **kwargs,
-            )
-        else:
-            jax.experimental.io_callback(
-                functools.partial(log, wandb_run, step, num_runs=num_runs),
-                (),
-                run_index,
-                *args,
-                **kwargs,
-            )
+        jax.experimental.io_callback(
+            functools.partial(log, wandb_run_array, num_runs=num_runs),
+            (),
+            step,
+            run_index,
+            *args,
+            **kwargs,
+        )
 
         return
 
