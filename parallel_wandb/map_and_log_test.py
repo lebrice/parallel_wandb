@@ -10,7 +10,7 @@ from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.log import NestedSequence
 from parallel_wandb.log_test import mock_run
-from parallel_wandb.map_and_log import LogContext, map_fn_and_log_to_wandb
+from parallel_wandb.map_and_log import LogContext, map_fn_foreach_run
 
 
 @pytest.mark.parametrize("jit", [False, True])
@@ -49,7 +49,7 @@ def test_map_and_log_to_wandb(jit: bool):
         run_index: jax.Array | None = None,
     ):
         image_data = _make_image(rng)
-        map_fn_and_log_to_wandb(
+        map_fn_foreach_run(
             wandb_run,
             step=step,
             fn=_log_image,
@@ -145,7 +145,7 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
         wandb_run: Run | NestedSequence[Run],
     ):
         image_data = _make_image(rng)
-        map_fn_and_log_to_wandb(
+        map_fn_foreach_run(
             wandb_run,
             step=step,
             fn=_log_image,
@@ -162,58 +162,58 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
         training_step = jax.jit(training_step, static_argnames=["wandb_run"])
 
     training_step(
-        jax.vmap(jax.random.key)(jnp.arange(2)),
-        jnp.arange(2) * 10,
+        jax.vmap(jax.random.key)(jnp.asarray([0, 1])),
+        jnp.asarray([10, 100]),  # step
         jnp.arange(2),
         fake_runs,
     )
     training_step(
-        jax.vmap(jax.random.key)(jnp.arange(2) + 100),
-        (jnp.arange(2) + 1) * 10,
+        jax.vmap(jax.random.key)(jnp.asarray([20, 21])),
+        jnp.asarray([11, 101]),  # step
         jnp.arange(2),
         fake_runs,
     )
     assert fake_runs[0].log.call_count == 2
-    fake_runs[0].log.assert_any_call({"image": unittest.mock.ANY}, step=0)
     fake_runs[0].log.assert_any_call({"image": unittest.mock.ANY}, step=10)
+    fake_runs[0].log.assert_any_call({"image": unittest.mock.ANY}, step=11)
 
     assert fake_runs[1].log.call_count == 2
-    fake_runs[1].log.assert_any_call({"image": unittest.mock.ANY}, step=10)
-    fake_runs[1].log.assert_any_call({"image": unittest.mock.ANY}, step=20)
+    fake_runs[1].log.assert_any_call({"image": unittest.mock.ANY}, step=100)
+    fake_runs[1].log.assert_any_call({"image": unittest.mock.ANY}, step=101)
     assert wandb_Image.call_count == 4
 
     assert _log_image.call_args_list[0].args == (
-        LogContext(run_index=jnp.asarray(0, dtype=jnp.int32), num_runs=2, step=0),
+        LogContext(
+            run=fake_runs[0], run_index=jnp.asarray(0, dtype=jnp.int32), num_runs=2, step=10
+        ),
     )
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[0].kwargs,
-        {"data": _make_image(jax.random.key(0))},
-    )
-
     assert _log_image.call_args_list[1].args == (
-        LogContext(run_index=jnp.asarray(1, dtype=jnp.int32), num_runs=2, step=10),
+        LogContext(
+            run=fake_runs[1], run_index=jnp.asarray(1, dtype=jnp.int32), num_runs=2, step=100
+        ),
     )
-
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[1].kwargs,
-        {"data": _make_image(jax.random.key(1))},
-    )
-
     assert _log_image.call_args_list[2].args == (
-        LogContext(run_index=jnp.asarray(0, dtype=jnp.int32), num_runs=2, step=10),
-    )
-    optree.tree_map(
-        np.testing.assert_array_equal,
-        _log_image.call_args_list[2].kwargs,
-        {"data": _make_image(jax.random.key(100))},
+        LogContext(
+            run=fake_runs[0], run_index=jnp.asarray(0, dtype=jnp.int32), num_runs=2, step=11
+        ),
     )
     assert _log_image.call_args_list[3].args == (
-        LogContext(run_index=jnp.asarray(1, dtype=jnp.int32), num_runs=2, step=20),
+        LogContext(
+            run=fake_runs[1], run_index=jnp.asarray(1, dtype=jnp.int32), num_runs=2, step=101
+        ),
     )
     optree.tree_map(
         np.testing.assert_array_equal,
-        _log_image.call_args_list[3].kwargs,
-        {"data": _make_image(jax.random.key(101))},
+        (
+            _log_image.call_args_list[0].kwargs,
+            _log_image.call_args_list[1].kwargs,
+            _log_image.call_args_list[2].kwargs,
+            _log_image.call_args_list[3].kwargs,
+        ),
+        (
+            {"data": _make_image(jax.random.key(0))},
+            {"data": _make_image(jax.random.key(1))},
+            {"data": _make_image(jax.random.key(20))},
+            {"data": _make_image(jax.random.key(21))},
+        ),
     )

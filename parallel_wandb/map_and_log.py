@@ -16,14 +16,15 @@ logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class LogContext:
+    run: Run
     run_index: int
     num_runs: int
-    step: int | np.typing.ArrayLike
+    step: int
 
 
-def map_fn_and_log_to_wandb[**P](
+def map_fn_foreach_run[**P](
     wandb_run: Run | NestedSequence[Run],
-    fn: Callable[Concatenate[LogContext, P], dict[str, Any]],
+    fn: Callable[Concatenate[LogContext, P], dict[str, Any] | None],
     step: int | np.typing.ArrayLike,
     run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
     *args: P.args,
@@ -37,8 +38,9 @@ def map_fn_and_log_to_wandb[**P](
     In the case of Jax, this function will executed inside a `jax.experimental.io_callback`.
 
     `fn` should be a function that takes a `LogContext` as first argument.
-    This is dataclass that contains the run index, number of runs, and current step.
-    The function should then return a dictionary of things to log to wandb.
+    This is dataclass that contains the run, run index, number of runs, and current step.
+    The function should can either return a dictionary of things to log to wandb or
+    do the logging directly using the context's `run` attribute.
 
     - If `wandb_run` is a single run, the function will be called with the args
       and kwargs unchanged.
@@ -65,15 +67,14 @@ def map_fn_and_log_to_wandb[**P](
         if not isinstance(wandb_run, Run):
             indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
             wandb_run = np.asarray(wandb_run)[indexing_tuple]
-        if isinstance(step, np.ndarray) or (
-            hasattr(step, "ndim") and callable(getattr(step, "item", None))
-        ):
-            assert step.ndim == 0, step  # type: ignore
-            step = step.item()  # type: ignore
-        log_context = LogContext(run_index=run_index, num_runs=num_runs, step=step)
+        if not isinstance(step, int):
+            step = int(step)
+        log_context = LogContext(run=wandb_run, run_index=run_index, num_runs=num_runs, step=step)
         metrics = fn(log_context, *args, **kwargs)
         assert isinstance(step, int), step
-        wandb_run.log(metrics, step=step)
+        assert isinstance(metrics, dict) or metrics is None
+        if metrics:
+            wandb_run.log(metrics, step=step)
 
     if not multiple_runs and not metrics_are_stacked:
         wandb_run = wandb_run if isinstance(wandb_run, Run) else wandb_run_array.item()
@@ -102,7 +103,7 @@ def map_fn_and_log_to_wandb[**P](
             raise ValueError(
                 f"There are multiple wandb runs, some metrics are tracers, and metrics are not stacked "
                 f"(they don't have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
-                f"This indicates that you are likely calling `{map_fn_and_log_to_wandb.__name__}` inside a function "
+                f"This indicates that you are likely calling `{map_fn_foreach_run.__name__}` inside a function "
                 f"that is being vmapped, which is great!\n"
                 f"However, since we can't tell at which 'index' in the vmap we're at, "
                 f"you need to pass the `run_index` argument. "
@@ -152,28 +153,4 @@ def map_fn_and_log_to_wandb[**P](
                 **kwargs_i,
             )
         else:
-            log(wandb_run_i, run_index, num_runs, step_i, *args_i, **kwargs_i)
-    return
-    # Everything is a tracer.
-    # TODO: actually, part of the metrics could be tracers, and part not.
-
-    def log_fn(
-        wandb_run: Run,
-        step: int,
-        run_index: int,
-        num_runs: int,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ):
-        metrics = fn(run_index, num_runs, *args, **kwargs)
-        # Base case: single run, single metric.
-        logger.debug("Logging to wandb run %s: metrics=%s step=%s", wandb_run.name, metrics, step)
-        wandb_run.log(metrics, step=step)
-        return
-
-    for run_index, wandb_run_i, args_i, kwargs_i in slice(
-        wandb_run_array.shape, wandb_run_array, args, kwargs
-    ):
-        indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
-        step_i = get_step(step, indexing_tuple)
-        log_fn(wandb_run_i, step_i, run_index, wandb_run_array.size, *args_i, **kwargs_i)
+            log(wandb_run_i, step_i, run_index, num_runs, *args_i, **kwargs_i)

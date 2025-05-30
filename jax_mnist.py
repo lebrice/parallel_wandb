@@ -39,7 +39,7 @@ from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.init import wandb_init
 from parallel_wandb.log import NestedSequence, wandb_log
-from parallel_wandb.map_and_log import map_fn_and_log_to_wandb
+from parallel_wandb.map_and_log import map_fn_foreach_run
 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -284,29 +284,32 @@ def run(
         predictions = test_preds[:n_rows_in_table].argmax(-1)
         # network outputs come from log_softmax
         probabilities = jnp.exp(test_preds[:n_rows_in_table])
-        map_fn_and_log_to_wandb(
+        map_fn_foreach_run(
             wandb_run,
-            fn=lambda _context, images, targets, predictions, probabilities: {
-                "test_prediction": wandb.Table(
-                    columns=[
-                        "id",
-                        "image",
-                        "prediction",
-                        "target",
-                        *(f"score_{i}" for i in range(probabilities.shape[-1])),
-                    ],
-                    data=[
-                        [
-                            i,
-                            wandb.Image(np.asarray(image), caption=f"Test sample {i}"),
-                            predictions[i],
-                            targets[i],
-                            *probabilities[i],
-                        ]
-                        for i, image in enumerate(images)
-                    ],
-                ),
-            },
+            fn=lambda ctx, images, targets, predictions, probabilities: ctx.run.log(
+                {
+                    "test_prediction": wandb.Table(
+                        columns=[
+                            "id",
+                            "image",
+                            "prediction",
+                            "target",
+                            *(f"score_{i}" for i in range(probabilities.shape[-1])),
+                        ],
+                        data=[
+                            [
+                                i,
+                                wandb.Image(np.asarray(image), caption=f"Test sample {i}"),
+                                predictions[i],
+                                targets[i],
+                                *probabilities[i],
+                            ]
+                            for i, image in enumerate(images)
+                        ],
+                    ),
+                },
+                step=ctx.step,
+            ),
             step=(epoch + 1) * num_train_batches,
             run_index=run_index,
             images=images,
