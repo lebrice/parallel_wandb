@@ -1,3 +1,4 @@
+import dataclasses
 import functools
 import logging
 from collections.abc import Callable
@@ -13,9 +14,16 @@ from parallel_wandb.utils import NestedSequence, get_step, is_tracer, slice
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class LogContext:
+    run_index: int
+    num_runs: int
+    step: int | np.typing.ArrayLike
+
+
 def map_fn_and_log_to_wandb[**P](
     wandb_run: Run | NestedSequence[Run],
-    fn: Callable[Concatenate[int, int, P], dict[str, Any]],
+    fn: Callable[Concatenate[LogContext, P], dict[str, Any]],
     step: int | np.typing.ArrayLike,
     run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike | None = None,
     *args: P.args,
@@ -26,16 +34,16 @@ def map_fn_and_log_to_wandb[**P](
     This is meant to be used to log things like wandb tables, images and such, that
     need to be created with the data of each run.
 
-    `fn` should be a function that takes a grid position (tuple of ints) in addition
-    to args and kwargs, then return a dictionary of stuff to log to wandb.
+    In the case of Jax, this function will executed inside a `jax.experimental.io_callback`.
 
-    - If `wandb_run` is a single run, the function will be called with an empty
-      tuple as first argument and the args and kwargs unchanged.
-    - If `wandb_run` is a list of runs, the function will be called with the
-      current position in the grid as the first argument, followed by the sliced
-      args and kwargs.
+    `fn` should be a function that takes a `LogContext` as first argument.
+    This is dataclass that contains the run index, number of runs, and current step.
+    The function should then return a dictionary of things to log to wandb.
 
-    This works recursively, so the `wandb_run` can be a list of list of wandb runs, etc.
+    - If `wandb_run` is a single run, the function will be called with the args
+      and kwargs unchanged.
+    - If `wandb_run` is an array of runs, the function will be called with the
+      sliced args and kwargs for each run.
     """
     wandb_run_array = np.asanyarray(wandb_run)
     if all(run.disabled for run in wandb_run_array.flatten()):
@@ -62,7 +70,8 @@ def map_fn_and_log_to_wandb[**P](
         ):
             assert step.ndim == 0, step  # type: ignore
             step = step.item()  # type: ignore
-        metrics = fn(run_index, num_runs, *args, **kwargs)
+        log_context = LogContext(run_index=run_index, num_runs=num_runs, step=step)
+        metrics = fn(log_context, *args, **kwargs)
         assert isinstance(step, int), step
         wandb_run.log(metrics, step=step)
 

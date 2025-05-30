@@ -274,17 +274,25 @@ def run(
 
         test_loss = jax.lax.pmean(test_loss, axis_name="batch")
         test_accuracy = jax.lax.pmean(test_accuracy, axis_name="batch")
-        n_rows_in_table = 20
 
+        # Log some test predictions to Weights & Biases.
+        # The `Image` and `Table` objects shouldn't be created in a JIT-ed function.
+        # Here the function that we pass will be executed in an io_callback.
+        n_rows_in_table = 20
+        images = einops.rearrange(test_images[:n_rows_in_table], "n h w -> n 1 h w")
+        targets = test_labels[:n_rows_in_table].argmax(-1)
+        predictions = test_preds[:n_rows_in_table].argmax(-1)
+        # network outputs come from log_softmax
+        probabilities = jnp.exp(test_preds[:n_rows_in_table])
         map_fn_and_log_to_wandb(
             wandb_run,
-            fn=lambda run_index, num_runs, images, targets, predictions, probabilities: {
+            fn=lambda _context, images, targets, predictions, probabilities: {
                 "test_prediction": wandb.Table(
                     columns=[
                         "id",
                         "image",
-                        "guess",
-                        "truth",
+                        "prediction",
+                        "target",
                         *(f"score_{i}" for i in range(probabilities.shape[-1])),
                     ],
                     data=[
@@ -301,11 +309,10 @@ def run(
             },
             step=(epoch + 1) * num_train_batches,
             run_index=run_index,
-            images=einops.rearrange(test_images[:n_rows_in_table], "n h w -> n 1 h w"),
-            targets=test_labels[:n_rows_in_table].argmax(-1),
-            predictions=test_preds[:n_rows_in_table].argmax(-1),
-            # network outputs come from log_softmax
-            probabilities=jnp.exp(test_preds[:n_rows_in_table]),
+            images=images,
+            targets=targets,
+            predictions=predictions,
+            probabilities=probabilities,
         )
         wandb_log(
             wandb_run,

@@ -29,7 +29,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["parallel_wandb", "tests"]
-norecursedirs = [".venv"]
+norecursedirs = [".venv", "wandb"]
 addopts = ["--doctest-modules"]
 
 [tool.uv]

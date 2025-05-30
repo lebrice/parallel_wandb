@@ -10,7 +10,7 @@ from wandb.sdk.wandb_run import Run
 
 from parallel_wandb.log import NestedSequence
 from parallel_wandb.log_test import mock_run
-from parallel_wandb.map_and_log import map_fn_and_log_to_wandb
+from parallel_wandb.map_and_log import LogContext, map_fn_and_log_to_wandb
 
 
 @pytest.mark.parametrize("jit", [False, True])
@@ -27,7 +27,7 @@ def test_map_and_log_to_wandb(jit: bool):
             maxval=256,
         ).astype(jnp.uint8)
 
-    def _log_image(run_index: int, total_runs: int, data):
+    def _log_image(context: LogContext, data):
         assert isinstance(data, jax.Array)
         # This should NEVER be a tracer!
         # We want this to be called as an io_callback.
@@ -36,7 +36,8 @@ def test_map_and_log_to_wandb(jit: bool):
         assert "Tracer" not in type(data).__name__
         return {
             "image": wandb_Image(
-                jax.device_get(data), caption=f"Run index {run_index} out of {total_runs}"
+                jax.device_get(data),
+                caption=f"Run index {context.run_index} out of {context.num_runs}",
             )
         }
 
@@ -121,7 +122,7 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
             maxval=256,
         ).astype(jnp.uint8)
 
-    def _log_image(run_index: int, total_runs: int, data):
+    def _log_image(context: LogContext, data):
         assert isinstance(data, jax.Array)
         # This should NEVER be a tracer!
         # We want this to be called as an io_callback.
@@ -130,7 +131,8 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
         assert "Tracer" not in type(data).__name__
         return {
             "image": wandb_Image(
-                jax.device_get(data), caption=f"Run index {run_index} out of {total_runs}"
+                jax.device_get(data),
+                caption=f"Run index {context.run_index} out of {context.num_runs}",
             )
         }
 
