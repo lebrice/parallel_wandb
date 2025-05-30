@@ -1,4 +1,4 @@
-"""An example of how to do logging to multiple wandb runs in parallel."""
+"""Lightweight library to facilitate logging to multiple Weights & Biases runs in parallel."""
 
 from .init import wandb_init
 from .map_and_log import map_fn_foreach_run
