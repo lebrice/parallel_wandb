@@ -69,7 +69,7 @@ def wandb_log(
             )
 
         assert not isinstance(wandb_run, Run)
-        return wandb_log_under_vmap(wandb_run, metrics=metrics, step=step, run_index=run_index)
+        return _wandb_log_under_vmap(wandb_run, metrics=metrics, step=step, run_index=run_index)
 
     def log(wandb_run: Run, metrics: dict[str, Any], step: int | np.typing.ArrayLike):
         """Base case: single run, simple dict of metrics."""
@@ -128,7 +128,7 @@ def wandb_log(
     return
 
 
-def wandb_log_under_vmap(
+def _wandb_log_under_vmap(
     wandb_run: NestedSequence[Run],
     run_index: np.typing.NDArray[np.integer] | np.typing.ArrayLike,
     metrics: dict[str, Any],
