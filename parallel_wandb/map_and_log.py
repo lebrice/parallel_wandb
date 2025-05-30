@@ -33,7 +33,7 @@ def map_fn_foreach_run(
     *args: P.args,
     **kwargs: P.kwargs,
 ):
-    """Map a function over the (sliced) arg and kwargs and log the results to wandb.
+    """Map a function over the sliced arg and kwargs for each run and log the results to wandb.
 
     This is meant to be used to log things like wandb tables, images and such, that
     need to be created with the data of each run.
@@ -49,8 +49,17 @@ def map_fn_foreach_run(
       and kwargs unchanged.
     - If `wandb_run` is an array of runs, the function will be called with the
       sliced args and kwargs for each run.
+
+    Arguments:
+        wandb_run: Wandb run or ndarray of Wandb runs. Can have more than one dimension.
+        fn: Function to call with the context and sliced args and kwargs.
+        step: The current step. Can either be an int or an array of the same shape as the runs array.
+        run_index: Array of the same shape as `wandb_run` that needs to be passed if this is to be vmapped.
+        args: The positional arguments to the function.
+        kwargs: The keyword arguments to the function.
     """
     wandb_run_array = np.asanyarray(wandb_run)
+
     if all(run.disabled for run in wandb_run_array.flatten()):
         return
     multiple_runs = wandb_run_array.size > 1
@@ -59,7 +68,7 @@ def map_fn_foreach_run(
     metrics_are_stacked = _check_shape_prefix((args, kwargs), wandb_run_array.shape)
 
     def log(
-        wandb_run: Run,
+        wandb_run: Run | np.ndarray,
         step: int | np.typing.ArrayLike,
         run_index: int,
         num_runs: int,
@@ -70,8 +79,11 @@ def map_fn_foreach_run(
         if not isinstance(wandb_run, Run):
             indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
             wandb_run = np.asarray(wandb_run)[indexing_tuple]
+        assert isinstance(wandb_run, Run), wandb_run
+
         if not isinstance(step, int):
-            step = int(step)
+            step = int(step.item())
+
         log_context = LogContext(run=wandb_run, run_index=run_index, num_runs=num_runs, step=step)
         metrics = fn(log_context, *args, **kwargs)
         assert isinstance(step, int), step
@@ -105,13 +117,13 @@ def map_fn_foreach_run(
         if run_index is None:
             raise ValueError(
                 f"There are multiple wandb runs, some metrics are tracers, and metrics are not stacked "
-                f"(they don't have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
+                f"(they don't have the {wandb_run_array.shape=} as a prefix in their shapes).\n"
                 f"This indicates that you are likely calling `{map_fn_foreach_run.__name__}` inside a function "
                 f"that is being vmapped, which is great!\n"
                 f"However, since we can't tell at which 'index' in the vmap we're at, "
                 f"you need to pass the `run_index` argument. "
                 f"This array will be used to index into `wandb_runs` to select which run to log at.\n"
-                f"`run_index=jnp.arange(num_seeds)` is a good option.\n"
+                f"`run_index=jnp.arange(num_runs)` is a good option.\n"
                 f"See the `jax_mnist.py` example in the GitHub repo for an example.\n"
                 f"Metric shapes: {optree.tree_map(jax.typeof, (args, kwargs))}"  # type: ignore
             )
