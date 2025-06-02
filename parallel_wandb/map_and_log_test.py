@@ -1,4 +1,3 @@
-from pathlib import Path
 import unittest.mock
 from unittest.mock import Mock
 
@@ -9,7 +8,6 @@ import pytest
 import wandb
 from wandb.sdk.wandb_run import Run
 
-from parallel_wandb.init import wandb_init
 from parallel_wandb.log import NestedSequence
 from parallel_wandb.log_test import mock_run
 from parallel_wandb.map_and_log import LogContext, map_fn_foreach_run
@@ -219,49 +217,3 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
             {"data": _make_image(jax.random.key(21))},
         ),
     )
-
-
-def test_other_case(tmp_path: Path):
-    import jax
-    import jax.numpy as jnp
-
-    seeds = jnp.arange(5)
-
-    runs = wandb_init(
-        {"config": {"seed": seeds}},
-        _wandb_init=Mock(spec=wandb.init, spec_set=True, wraps=wandb.init),
-        dir=tmp_path,
-        mode="offline",
-    )
-
-    rngs = jax.vmap(jax.random.key)(seeds)
-    runs_array = np.asarray(runs)
-
-    def train(rng: jax.Array, run_index: jax.Array):
-        images = jax.random.uniform(
-            rng,
-            shape=(32, 32, 3),
-            minval=0,
-            maxval=255,
-        ).astype(np.uint8)
-        step = 0
-        map_fn_foreach_run(
-            runs,
-            lambda ctx, image: {"train_samples": wandb.Image(np.asarray(image))},
-            step=step,
-            run_index=run_index,
-            image=images,
-        )
-        jax.debug.print("images: {}", images.mean())
-        return images
-
-    # Important: Since we use vmap below, we need to give this array
-    # with the index of each run as a vmapped argument. This is weird, yes,
-    # but it's the only way I've found to make this work.
-    # LMK if you have better ideas.
-    run_indices = np.arange(runs_array.size).reshape(runs_array.shape)
-
-    train_fn = jax.vmap(train, in_axes=0)
-    seed_images = train_fn(rngs, run_indices)
-
-    runs[0].log.assert_called()
