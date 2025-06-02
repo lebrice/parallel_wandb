@@ -2,7 +2,7 @@ import dataclasses
 import functools
 import logging
 from collections.abc import Callable
-from typing import Any, Concatenate
+from typing import Any, Concatenate, ParamSpec
 
 import numpy as np
 import optree
@@ -22,7 +22,10 @@ class LogContext:
     step: int
 
 
-def map_fn_foreach_run[**P](
+P = ParamSpec("P")
+
+
+def map_fn_foreach_run(
     wandb_run: Run | NestedSequence[Run],
     fn: Callable[Concatenate[LogContext, P], dict[str, Any] | None],
     step: int | np.typing.ArrayLike,

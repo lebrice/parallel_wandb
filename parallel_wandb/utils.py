@@ -1,6 +1,6 @@
 import operator
 import typing
-from typing import Any, Iterable, Mapping, Sequence, TypeVar
+from typing import Any, Iterable, Mapping, Sequence, TypeAlias, TypeVar, TypeVarTuple
 
 import numpy as np
 import optree
@@ -8,8 +8,8 @@ import optree
 T = TypeVar("T")
 K = TypeVar("K")
 V = TypeVar("V")
-type NestedSequence[T] = Sequence[T | NestedSequence[T]]
-type NestedMapping[K, V] = Mapping[K, V | NestedMapping[K, V]]
+NestedSequence: TypeAlias = Sequence[T | "NestedSequence[T]"]
+NestedMapping: TypeAlias = Mapping[K, V | "NestedMapping[K, V]"]
 
 
 def shape_begins_with(metric: np.typing.ArrayLike, prefix: tuple[int, ...]) -> bool:
@@ -20,7 +20,10 @@ def shape_begins_with(metric: np.typing.ArrayLike, prefix: tuple[int, ...]) -> b
     return metric.shape[: len(prefix)] == prefix
 
 
-def slice[*Ts](
+Ts = TypeVarTuple("Ts")
+
+
+def slice(
     run_grid_shape: tuple[int, ...], *args: *Ts, strict: bool = True
 ) -> Iterable[tuple[int, *Ts]]:
     """Yields the slices of `args` for each run in the grid.

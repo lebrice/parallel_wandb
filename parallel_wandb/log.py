@@ -3,7 +3,7 @@
 import functools
 import operator
 from logging import getLogger
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import optree
@@ -172,7 +172,10 @@ def wandb_log_under_vmap(
     )
 
 
-def _merge[T](v1: T, v2: T) -> T:
+T = TypeVar("T")
+
+
+def _merge(v1: T, v2: T) -> T:
     """Merge two values (maybe dictionaries) recursively."""
     if not isinstance(v1, dict):
         return v2
