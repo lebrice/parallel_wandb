@@ -33,7 +33,7 @@ def map_fn_foreach_run(
     *args: P.args,
     **kwargs: P.kwargs,
 ):
-    """Map a function over the (sliced) arg and kwargs and log the results to wandb.
+    """Map a function over the sliced arg and kwargs for each run and log the results to wandb.
 
     This is meant to be used to log things like wandb tables, images and such, that
     need to be created with the data of each run.
@@ -49,17 +49,55 @@ def map_fn_foreach_run(
       and kwargs unchanged.
     - If `wandb_run` is an array of runs, the function will be called with the
       sliced args and kwargs for each run.
+
+    Arguments:
+        wandb_run: Wandb run or ndarray of Wandb runs. Can have more than one dimension.
+        fn: Function to call with the context and sliced args and kwargs.
+        step: The current step. Can either be an int or an array of the same shape as the runs array.
+        run_index: Array of the same shape as `wandb_run` that needs to be passed if this is to be vmapped.
+        args: The positional arguments to the function.
+        kwargs: The keyword arguments to the function.
+
+    ## Example
+
+    ```python
+    import wandb
+    from parallel_wandb import wandb_init, map_fn_foreach_run
+    import numpy as np
+
+    seeds = np.arange(5)
+    runs = wandb_init(
+        {"config": {"seed": seeds}},
+        project="test_project",
+        group="testing",
+    )
+    # some data for each run
+    images = np.stack(
+        [np.random.default_rng(seed).uniform(0, 255, (32, 32, 3)).astype(np.uint8) for seed in seeds]
+    )
+    # Create a wandb.Image with the data for each run:
+    step = 0
+    map_fn_foreach_run(
+        runs,
+        lambda ctx, image: {"train_samples": wandb.Image(image)},
+        step=step,
+        image=images,
+    )
+    ```
     """
     wandb_run_array = np.asanyarray(wandb_run)
+
     if all(run.disabled for run in wandb_run_array.flatten()):
         return
     multiple_runs = wandb_run_array.size > 1
-    this_is_being_traced = optree.tree_any(optree.tree_map(is_tracer, (wandb_run, step)))  # type: ignore
+    this_is_being_traced = optree.tree_any(
+        optree.tree_map(is_tracer, (step, run_index, args, kwargs))
+    )  # type: ignore
     logger.debug(f"Logging to wandb with {wandb_run_array.shape=} and {this_is_being_traced=}")
     metrics_are_stacked = _check_shape_prefix((args, kwargs), wandb_run_array.shape)
 
     def log(
-        wandb_run: Run,
+        wandb_run: Run | np.ndarray,
         step: int | np.typing.ArrayLike,
         run_index: int,
         num_runs: int,
@@ -68,10 +106,16 @@ def map_fn_foreach_run(
     ):
         """Base case: single run, simple dict of metrics."""
         if not isinstance(wandb_run, Run):
-            indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
-            wandb_run = np.asarray(wandb_run)[indexing_tuple]
+            if wandb_run.size == 1:
+                wandb_run = wandb_run.item()
+            else:
+                indexing_tuple = np.unravel_index(run_index, wandb_run_array.shape)
+                wandb_run = np.asarray(wandb_run)[*indexing_tuple]
+        assert isinstance(wandb_run, Run), wandb_run
+
         if not isinstance(step, int):
-            step = int(step)
+            step = int(step.item())
+
         log_context = LogContext(run=wandb_run, run_index=run_index, num_runs=num_runs, step=step)
         metrics = fn(log_context, *args, **kwargs)
         assert isinstance(step, int), step
@@ -105,13 +149,13 @@ def map_fn_foreach_run(
         if run_index is None:
             raise ValueError(
                 f"There are multiple wandb runs, some metrics are tracers, and metrics are not stacked "
-                f"(they don't have the {wandb_run_array.shape=} as a prefix in their shapes). \n"
+                f"(they don't have the {wandb_run_array.shape=} as a prefix in their shapes).\n"
                 f"This indicates that you are likely calling `{map_fn_foreach_run.__name__}` inside a function "
                 f"that is being vmapped, which is great!\n"
                 f"However, since we can't tell at which 'index' in the vmap we're at, "
                 f"you need to pass the `run_index` argument. "
                 f"This array will be used to index into `wandb_runs` to select which run to log at.\n"
-                f"`run_index=jnp.arange(num_seeds)` is a good option.\n"
+                f"`run_index=jnp.arange(num_runs)` is a good option.\n"
                 f"See the `jax_mnist.py` example in the GitHub repo for an example.\n"
                 f"Metric shapes: {optree.tree_map(jax.typeof, (args, kwargs))}"  # type: ignore
             )
@@ -121,15 +165,15 @@ def map_fn_foreach_run(
         # )
 
         num_runs = wandb_run_array.size
-        assert is_tracer(step), "assuming step is also a tracer for now."
         jax.experimental.io_callback(
-            functools.partial(log, wandb_run, num_runs=num_runs),
+            functools.partial(log, wandb_run_array, num_runs=num_runs),
             (),
             step,
             run_index,
             *args,
             **kwargs,
         )
+
         return
 
     num_runs = wandb_run_array.size
@@ -147,13 +191,20 @@ def map_fn_foreach_run(
             import jax.experimental  # type: ignore
 
             # logger.debug("args_i=%s, kwargs_i=%s, ", args_i, kwargs_i)
-            assert is_tracer(step_i), "assuming step is also a tracer for now."
-            jax.experimental.io_callback(
-                functools.partial(log, wandb_run_i, run_index, num_runs),
-                (),
-                step_i,
-                *args_i,
-                **kwargs_i,
-            )
+            if is_tracer(step_i):
+                jax.experimental.io_callback(
+                    functools.partial(log, wandb_run_i, run_index, num_runs),
+                    (),
+                    step_i,
+                    *args_i,
+                    **kwargs_i,
+                )
+            else:
+                jax.experimental.io_callback(
+                    functools.partial(log, step_i, wandb_run_i, run_index, num_runs),
+                    (),
+                    *args_i,
+                    **kwargs_i,
+                )
         else:
             log(wandb_run_i, step_i, run_index, num_runs, *args_i, **kwargs_i)

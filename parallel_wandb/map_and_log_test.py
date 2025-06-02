@@ -1,3 +1,4 @@
+import functools
 import unittest.mock
 from unittest.mock import Mock
 
@@ -8,7 +9,8 @@ import pytest
 import wandb
 from wandb.sdk.wandb_run import Run
 
-from parallel_wandb.log import NestedSequence
+from parallel_wandb.init import wandb_init
+from parallel_wandb.log import NestedSequence, wandb_log
 from parallel_wandb.log_test import mock_run
 from parallel_wandb.map_and_log import LogContext, map_fn_foreach_run
 
@@ -109,6 +111,90 @@ def test_map_and_log_to_wandb(jit: bool):
 
 
 @pytest.mark.parametrize("jit", [False, True])
+def test_map_with_disabled_runs_doesnt_call_anything(jit: bool):
+    import jax.numpy as jnp
+
+    def _make_image(rng: jax.Array):
+        return jax.random.uniform(
+            rng,
+            (32, 32, 3),
+            minval=0,
+            maxval=256,
+        ).astype(jnp.uint8)
+
+    def _log_image(context: LogContext, data):
+        assert isinstance(data, jax.Array)
+        # This should NEVER be a tracer!
+        # We want this to be called as an io_callback.
+        # EXCEPT if MAYBE, doing `jax.device_get` here signals to jax.jit
+        # to somehow do the rest of this with a new object every time?
+        assert "Tracer" not in type(data).__name__
+        return {
+            "image": wandb.Image(
+                jax.device_get(data),
+                caption=f"Run index {context.run_index} out of {context.num_runs}",
+            )
+        }
+
+    _log_image = unittest.mock.Mock(spec=_log_image, spec_set=True, wraps=_log_image)
+
+    def training_step(
+        rng: jax.Array,
+        step: jax.Array,
+        *,
+        wandb_run: Run | NestedSequence[Run],
+        run_index: jax.Array | None = None,
+    ):
+        image_data = _make_image(rng)
+        map_fn_foreach_run(
+            wandb_run,
+            step=step,
+            fn=_log_image,
+            data=image_data,
+            run_index=run_index,
+        )
+        wandb_log(
+            wandb_run,
+            step=step,
+            metrics={"image_mean": image_data.mean()},
+        )
+        return image_data
+
+    if jit:
+        training_step = jax.jit(training_step, static_argnames=["wandb_run"])
+
+    disabled_run = Mock(wraps=wandb.init(project="test_project", mode="disabled"))
+    training_step(
+        jax.random.key(0),
+        step=jnp.asarray(0),
+        # run_index=jnp.arange(0),
+        wandb_run=disabled_run,
+    )
+    _log_image.assert_not_called()
+    disabled_run.log.assert_not_called()
+
+    disabled_runs = wandb_init(
+        {"config": {"seed": [0, 1]}}, project="test_project", mode="disabled"
+    )
+    assert isinstance(disabled_runs, np.ndarray)
+    disabled_runs = disabled_runs.tolist()
+
+    disabled_runs = optree.tree_map(lambda r: Mock(wraps=r), disabled_runs)
+    vmapped_train_fn = jax.vmap(functools.partial(training_step, wandb_run=tuple(disabled_runs)))
+    if jit:
+        vmapped_train_fn = jax.jit(vmapped_train_fn)
+    vmapped_train_fn(
+        jax.vmap(jax.random.key)(jnp.arange(2)),
+        step=jnp.arange(2),
+    )
+    _log_image.assert_not_called()
+    for disabled_run in optree.tree_leaves(disabled_runs):
+        assert isinstance(disabled_run, Mock)
+        assert disabled_run.disabled
+        disabled_run.log.assert_not_called()
+
+
+@pytest.mark.parametrize("jit", [False, True])
 def test_map_and_log_to_wandb_with_vmap(jit: bool):
     import jax.numpy as jnp
 
@@ -124,7 +210,7 @@ def test_map_and_log_to_wandb_with_vmap(jit: bool):
 
     def _log_image(context: LogContext, data):
         assert isinstance(data, jax.Array)
-        # This should NEVER be a tracer!
+        # This should NOT be a tracer!
         # We want this to be called as an io_callback.
         # EXCEPT if MAYBE, doing `jax.device_get` here signals to jax.jit
         # to somehow do the rest of this with a new object every time?
