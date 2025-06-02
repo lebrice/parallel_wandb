@@ -21,7 +21,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from os import path
-from typing import Callable
+from typing import Callable, ParamSpec, TypeVar
 
 import einops
 import jax
@@ -425,7 +425,11 @@ def _mnist_raw():
     return train_images, train_labels, test_images, test_labels
 
 
-def _time_fn[**P, OutT](fn: Callable[P, OutT], desc: str = ""):
+P = ParamSpec("P")
+OutT = TypeVar("OutT")
+
+
+def _time_fn(fn: Callable[P, OutT], desc: str = ""):
     desc = desc or fn.__name__
 
     @functools.wraps(fn)

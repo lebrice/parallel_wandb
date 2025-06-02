@@ -7,7 +7,7 @@ import operator
 import os
 import typing
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, ParamSpec
 
 import numpy as np
 import optree
@@ -18,8 +18,10 @@ from wandb.sdk.wandb_run import Run
 from parallel_wandb.log import _merge
 from parallel_wandb.utils import NestedMapping, NestedSequence, is_tracer
 
+P = ParamSpec("P")
 
-def wandb_init[**P](
+
+def wandb_init(
     stacked_overrides: NestedMapping[str, np.typing.ArrayLike] | None = None,
     process_index: int | None = None,
     _wandb_init: Callable[P, Run] = wandb.init,
